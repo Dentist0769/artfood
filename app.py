@@ -5,13 +5,8 @@ from typing import Optional, List, Dict
 import pandas as pd
 
 st.set_page_config(page_title="🍳 Кулинарный калькулятор PRO", layout="wide")
-
 st.title("🍳 Кулинарный калькулятор (PRO)")
 st.markdown("Управление рецептами, ингредиентами и расчет себестоимости")
-
-# ============================================================================
-# БАЗА ДАННЫХ
-# ============================================================================
 
 def init_db():
     conn = sqlite3.connect('recipes.db')
@@ -34,7 +29,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-
 def save_recipe(name: str, category: str, ingredients: List[Dict], video_url: Optional[str] = None):
     conn = sqlite3.connect('recipes.db')
     c = conn.cursor()
@@ -45,14 +39,12 @@ def save_recipe(name: str, category: str, ingredients: List[Dict], video_url: Op
     conn.commit()
     conn.close()
 
-
 def get_recipes(category: Optional[str] = None) -> List[Dict]:
     conn = sqlite3.connect('recipes.db')
     c = conn.cursor()
     if category:
         c.execute('''SELECT id, name, category, ingredients, video_url, created_at
-                     FROM recipes WHERE category = ?
-                     ORDER BY created_at DESC''', (category,))
+                     FROM recipes WHERE category = ? ORDER BY created_at DESC''', (category,))
     else:
         c.execute('''SELECT id, name, category, ingredients, video_url, created_at
                      FROM recipes ORDER BY created_at DESC''')
@@ -71,7 +63,6 @@ def get_recipes(category: Optional[str] = None) -> List[Dict]:
         })
     return recipes
 
-
 def delete_recipe(recipe_id: int):
     conn = sqlite3.connect('recipes.db')
     c = conn.cursor()
@@ -79,17 +70,14 @@ def delete_recipe(recipe_id: int):
     conn.commit()
     conn.close()
 
-
 def save_prices(prices: Dict[str, Dict]):
     conn = sqlite3.connect('recipes.db')
     c = conn.cursor()
     for ingredient, data in prices.items():
         c.execute('''INSERT OR REPLACE INTO prices (ingredient, price, unit)
-                     VALUES (?, ?, ?)''',
-                  (ingredient, data['price'], data['unit']))
+                     VALUES (?, ?, ?)''', (ingredient, data['price'], data['unit']))
     conn.commit()
     conn.close()
-
 
 def get_prices() -> Dict[str, Dict]:
     conn = sqlite3.connect('recipes.db')
@@ -102,11 +90,6 @@ def get_prices() -> Dict[str, Dict]:
         prices[row[0]] = {'price': row[1], 'unit': row[2]}
     return prices
 
-
-# ============================================================================
-# РАБОТА С YOUTUBE
-# ============================================================================
-
 def get_video_id(url: str) -> Optional[str]:
     try:
         pattern = r'(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&\n?#]+)'
@@ -114,7 +97,6 @@ def get_video_id(url: str) -> Optional[str]:
         return match.group(1) if match else None
     except:
         return None
-
 
 def get_youtube_data(video_url: str) -> Dict:
     try:
@@ -172,46 +154,26 @@ def get_youtube_data(video_url: str) -> Dict:
             'error': str(e)
         }
 
-
-# ============================================================================
-# ПАРСИНГ ТЕКСТА СО СТРАНИЦЫ
-# ============================================================================
-
 def get_page_text(url: str) -> Optional[str]:
-    """Парсит текст со страницы по ссылке"""
     try:
         import requests
         from bs4 import BeautifulSoup
-
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(url, headers=headers, timeout=10)
         response.encoding = 'utf-8'
-
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
-
-            # Удаляем скрипты и стили
             for script in soup(['script', 'style']):
                 script.decompose()
-
-            # Получаем текст
             text = soup.get_text()
-
-            # Очищаем текст
             lines = (line.strip() for line in text.splitlines())
             chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
             text = ' '.join(chunk for chunk in chunks if chunk)
-
             return text if len(text) > 100 else None
         else:
             return None
     except Exception as e:
         return None
-
-
-# ============================================================================
-# ПАРСИНГ ИНГРЕДИЕНТОВ
-# ============================================================================
 
 def find_ingredients(text: str) -> List[Dict]:
     if not text:
@@ -226,30 +188,24 @@ def find_ingredients(text: str) -> List[Dict]:
                      'духов', 'духовк', 'разогреть', 'выпекать', 'оставить', 'смешать', 'взбить'}
 
     units_map = {
-        'мл': 'мл', 'ml': 'мл', 'миллилитр': 'мл', 'миллилитра': 'мл', 'миллилитров': 'мл',
-        'г': 'г', 'g': 'г', 'грамм': 'г', 'грамма': 'г', 'граммов': 'г',
-        'кг': 'кг', 'kg': 'кг', 'килограмм': 'кг', 'килограмма': 'кг', 'килограммов': 'кг',
-        'л': 'л', 'l': 'л', 'литр': 'л', 'литра': 'л', 'литров': 'л',
-        'мг': 'мг', 'mg': 'мг',
+        'мл': 'мл', 'ml': 'мл', 'г': 'г', 'g': 'г', 'кг': 'кг', 'kg': 'кг',
+        'л': 'л', 'l': 'л', 'мг': 'мг', 'mg': 'мг',
         'шт': 'шт', 'pcs': 'шт', 'штук': 'шт', 'штука': 'шт', 'штуки': 'шт',
-        'ст.л': 'ст.л', 'tbsp': 'ст.л', 'столов': 'ст.л', 'ложк': 'ст.л',
-        'ч.л': 'ч.л', 'tsp': 'ч.л', 'чайн': 'ч.л',
+        'ст.л': 'ст.л', 'ст л': 'ст.л', 'tbsp': 'ст.л', 'столов': 'ст.л', 'ложка': 'ст.л',
+        'ч.л': 'ч.л', 'ч л': 'ч.л', 'tsp': 'ч.л', 'чайн': 'ч.л',
     }
 
-    # Паттерн 1: "400 г муки" (количество + единица + ингредиент)
-    pattern1 = r'(\d+(?:[.,]\d+)?)\s*(?:мл|ml|г|g|мг|mg|кг|kg|шт|pcs|л|l|ст\.л|tbsp|ч\.л|tsp|миллилитр|грамм|килограмм|штук|литр|ложки|ложки)\s+([а-яa-z\s]+?)(?=[,;.!?\n—]|$)'
+    units_pattern = r'(?:мл|ml|г|g|мг|mg|кг|kg|шт|pcs|л|l|ст\.л|ст л|tbsp|ч\.л|ч л|tsp|миллилитр|грамм|килограмм|штук|литр|ложк)'
 
-    # Паттерн 2: "мука — 400 г" (ингредиент — количество + единица)
-    pattern2 = r'([а-яa-z\s]+?)\s*—\s*(\d+(?:[.,]\d+)?)\s*(?:мл|ml|г|g|мг|mg|кг|kg|шт|pcs|л|l|ст\.л|tbsp|ч\.л|tsp|миллилитр|грамм|килограмм|штук|литр|ложки)'
+    pattern1 = rf'(\d+(?:[.,]\d+)?)\s*({units_pattern})\s+([а-яa-z\s]+?)(?=[,;.!?\n—]|$)'
+    pattern2 = rf'([а-яa-z\s]+?)\s*—\s*(\d+(?:[.,]\d+)?)\s*({units_pattern})'
 
     def add_ingredient(name: str, quantity: float, full_match: str):
-        """Добавляет ингредиент если он прошел все фильтры"""
         skip = False
         for excl in exclude_words:
             if excl in name:
                 skip = True
                 break
-
         if skip:
             return
 
@@ -260,34 +216,26 @@ def find_ingredients(text: str) -> List[Dict]:
                 break
 
         name = re.sub(r'[,;.!?—]', '', name).strip()
-
         if len(name) < 2 or len(name) > 50:
             return
-
         if not any(c.isalpha() for c in name):
             return
 
         key = f"{name}_{unit}"
         if key not in seen and quantity > 0 and quantity < 10000:
-            ingredients.append({
-                'name': name,
-                'quantity': quantity,
-                'unit': unit
-            })
+            ingredients.append({'name': name, 'quantity': quantity, 'unit': unit})
             seen.add(key)
 
-    # Применяем паттерн 1
     for match in re.finditer(pattern1, text, re.IGNORECASE):
         try:
             quantity_str = match.group(1).replace(',', '.')
             quantity = float(quantity_str)
-            name = match.group(2).strip().lower()
+            name = match.group(3).strip().lower()
             full_match = match.group(0)
             add_ingredient(name, quantity, full_match)
-        except (ValueError, IndexError):
+        except:
             continue
 
-    # Применяем паттерн 2
     for match in re.finditer(pattern2, text, re.IGNORECASE):
         try:
             name = match.group(1).strip().lower()
@@ -295,34 +243,22 @@ def find_ingredients(text: str) -> List[Dict]:
             quantity = float(quantity_str)
             full_match = match.group(0)
             add_ingredient(name, quantity, full_match)
-        except (ValueError, IndexError):
+        except:
             continue
 
     return ingredients
 
-
-# ============================================================================
-# ИНИЦИАЛИЗАЦИЯ
-# ============================================================================
-
 init_db()
 CATEGORIES = ["Супы", "Вторые блюда", "Десерты и выпечка", "Консервация", "Колбасы", "Напитки", "Разное"]
 
-# ============================================================================
-# ИНТЕРФЕЙС
-# ============================================================================
-
 tab1, tab2, tab3 = st.tabs(["📺 Загрузка", "📋 Рецепты", "💰 Цены"])
 
-# ВКЛАДКА 1: ЗАГРУЗКА
 with tab1:
     st.subheader("Загрузка рецепта")
-
     input_mode = st.radio("Источник рецепта:", ["YouTube видео", "Ссылка на страницу"], horizontal=True)
 
     if input_mode == "YouTube видео":
         video_url = st.text_input("YouTube ссылка:", placeholder="https://youtube.com/watch?v=...")
-
         if st.button("🔄 Загрузить", type="primary", use_container_width=True):
             if not video_url.strip():
                 st.error("❌ Введите ссылку")
@@ -334,14 +270,9 @@ with tab1:
                     st.error(f"❌ Ошибка: {data['error']}")
                 else:
                     st.success("✅ Данные загружены!")
-
-                    # Сначала ищем в описании
                     ingredients_from_desc = find_ingredients(data['description'])
-
-                    # Если в описании мало ингредиентов - берем из субтитров
                     if len(ingredients_from_desc) < 5 and data['transcript']:
-                        ingredients_from_subs = find_ingredients(data['transcript'])
-                        ingredients = ingredients_from_subs
+                        ingredients = find_ingredients(data['transcript'])
                         source = "Субтитры видео"
                     else:
                         ingredients = ingredients_from_desc
@@ -357,7 +288,6 @@ with tab1:
 
     else:
         page_url = st.text_input("Ссылка на страницу:", placeholder="https://example.com/recipe...")
-
         if st.button("🔄 Загрузить", type="primary", use_container_width=True):
             if not page_url.strip():
                 st.error("❌ Введите ссылку")
@@ -365,45 +295,43 @@ with tab1:
                 with st.spinner("⏳ Загружаю страницу..."):
                     page_text = get_page_text(page_url)
 
-                if page_text:
+                if page_text and len(page_text) > 100:
                     st.success("✅ Страница загружена!")
-                    st.session_state.ingredients = find_ingredients(page_text)
-                    st.session_state.video_url = page_url
-                    st.session_state.video_title = "Рецепт со страницы"
+                    ingredients = find_ingredients(page_text)
+                    if ingredients:
+                        st.info(f"📍 Найдено ингредиентов: {len(ingredients)}")
+                        st.session_state.ingredients = ingredients
+                        st.session_state.video_url = page_url
+                        st.session_state.video_title = "Рецепт со страницы"
+                    else:
+                        st.warning(f"⚠️ Текст загружен ({len(page_text)} символов), но ингредиенты не распознаны")
                 else:
-                    st.error("❌ Не удалось загрузить страницу или извлечь текст")
+                    st.error("❌ Не удалось загрузить страницу или текст слишком короткий")
 
     if 'ingredients' in st.session_state and st.session_state.ingredients:
         st.divider()
         st.subheader("🥘 Найденные ингредиенты:")
-
-        ingredients = st.session_state.ingredients
-        for ing in ingredients:
+        for ing in st.session_state.ingredients:
             st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']}")
 
         st.divider()
         st.subheader("💾 Сохранить рецепт")
-
         default_name = st.session_state.get('video_title', '')
-        recipe_name = st.text_input("Название рецепта:", value=default_name, placeholder="Например: Борщ украинский")
+        recipe_name = st.text_input("Название рецепта:", value=default_name)
         category = st.selectbox("Категория:", CATEGORIES)
-
         if st.button("💾 Сохранить", type="primary", use_container_width=True):
             if not recipe_name.strip():
                 st.error("❌ Введите название рецепта")
             else:
                 video_url = st.session_state.get('video_url')
-                save_recipe(recipe_name, category, ingredients, video_url)
+                save_recipe(recipe_name, category, st.session_state.ingredients, video_url)
                 st.success(f"✅ Рецепт '{recipe_name}' сохранен!")
                 if 'ingredients' in st.session_state:
                     del st.session_state.ingredients
 
-# ВКЛАДКА 2: РЕЦЕПТЫ
 with tab2:
     st.subheader("📋 Сохраненные рецепты")
-
     filter_category = st.selectbox("Фильтр по категории:", ["Все"] + CATEGORIES)
-
     if filter_category == "Все":
         recipes = get_recipes()
     else:
@@ -413,29 +341,21 @@ with tab2:
         for recipe in recipes:
             with st.expander(f"📄 {recipe['name']} ({recipe['category']})"):
                 st.write(f"**Дата добавления:** {recipe['created_at']}")
-
                 if recipe['video_url']:
                     st.write(f"**Ссылка:** [Открыть]({recipe['video_url']})")
-
                 st.write("**Ингредиенты:**")
                 for ing in recipe['ingredients']:
                     st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']}")
-
-                col1, col2 = st.columns([1, 1])
-                with col1:
-                    if st.button("🗑️ Удалить", key=f"delete_{recipe['id']}", use_container_width=True):
-                        delete_recipe(recipe['id'])
-                        st.success("✅ Рецепт удален")
-                        st.rerun()
+                if st.button("🗑️ Удалить", key=f"delete_{recipe['id']}", use_container_width=True):
+                    delete_recipe(recipe['id'])
+                    st.success("✅ Рецепт удален")
+                    st.rerun()
     else:
         st.info("📌 Рецептов нет. Загрузите рецепт в вкладке 'Загрузка'")
 
-# ВКЛАДКА 3: ЦЕНЫ
 with tab3:
     st.subheader("💰 Управление ценами")
-
     st.write("**Загрузить прайс-лист:**")
-
     uploaded_file = st.file_uploader("Выберите текстовый файл с ценами (.txt, .csv)", type=["txt", "csv"])
 
     if uploaded_file:
@@ -443,7 +363,6 @@ with tab3:
             content = uploaded_file.read().decode('utf-8')
             lines = content.strip().split('\n')
             prices = {}
-
             for line in lines:
                 if '\t' in line:
                     parts = line.split('\t')
@@ -451,7 +370,6 @@ with tab3:
                     parts = line.split(',')
                 else:
                     continue
-
                 if len(parts) >= 3:
                     ingredient = parts[0].strip()
                     try:
@@ -463,11 +381,9 @@ with tab3:
 
             if prices:
                 st.success(f"✅ Найдено {len(prices)} позиций")
-
                 if st.button("💾 Сохранить цены", type="primary", use_container_width=True):
                     save_prices(prices)
                     st.success("✅ Цены сохранены!")
-
                 df = pd.DataFrame([
                     {'Ингредиент': k, 'Цена': v['price'], 'Единица': v['unit']}
                     for k, v in prices.items()
@@ -480,27 +396,21 @@ with tab3:
 
     st.divider()
     st.write("**Текущие цены в системе:**")
-
     current_prices = get_prices()
-
     if current_prices:
         df = pd.DataFrame([
             {'Ингредиент': k, 'Цена': v['price'], 'Единица': v['unit']}
             for k, v in current_prices.items()
         ])
         st.dataframe(df, use_container_width=True)
-
         st.write("**Добавить/изменить цену вручную:**")
-
         col1, col2, col3 = st.columns(3)
-
         with col1:
             ing_name = st.text_input("Ингредиент:", placeholder="Например: молоко")
         with col2:
             ing_price = st.number_input("Цена:", min_value=0.0, step=10.0)
         with col3:
             ing_unit = st.selectbox("Единица:", ["г", "мл", "шт", "л", "кг"])
-
         if st.button("➕ Добавить цену", use_container_width=True):
             if ing_name.strip():
                 save_prices({ing_name: {'price': ing_price, 'unit': ing_unit}})
@@ -508,3 +418,4 @@ with tab3:
                 st.rerun()
     else:
         st.info("📌 Цены не загружены. Загрузите прайс-лист выше")
+
