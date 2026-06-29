@@ -1,21 +1,138 @@
+
 """
-🍳 КАЛЬКУЛЯТОР СЕБЕСТОИМОСТИ БЛЮД (версия с yt-dlp)
-Работает напрямую с YouTube, без зависимости от Invidious
+🍳 КАЛЬКУЛЯТОР СЕБЕСТОИМОСТИ БЛЮД (ПРОФЕССИОНАЛЬНАЯ ВЕРСИЯ)
+3 вкладки: Загрузка, Рецепты, Цены
 """
 
 import streamlit as st
 import re
-from typing import Optional
-import os
-import json
+import sqlite3
+from typing import Optional, List, Dict
+import pandas as pd
+from datetime import datetime
 
-st.set_page_config(page_title="🍳 Кулинарный калькулятор", layout="wide")
+st.set_page_config(page_title="🍳 Кулинарный калькулятор PRO", layout="wide")
 
-st.title("🍳 Калькулятор себестоимости блюд")
-st.markdown("Вставьте ссылку на YouTube видео рецепта → приложение загрузит субтитры → рассчитает стоимость")
+st.title("🍳 Кулинарный калькулятор (PRO)")
+st.markdown("Управление рецептами, ингредиентами и расчет себестоимости")
 
 # ============================================================================
-# ПОЛУЧЕНИЕ СУБТИТРОВ через yt-dlp
+# БАЗА ДАННЫХ
+# ============================================================================
+
+def init_db():
+    """Инициализирует базу данных"""
+    conn = sqlite3.connect('recipes.db')
+    c = conn.cursor()
+
+    # Таблица рецептов
+    c.execute('''CREATE TABLE IF NOT EXISTS recipes (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        category TEXT NOT NULL,
+        ingredients TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )''')
+
+    # Таблица цен
+    c.execute('''CREATE TABLE IF NOT EXISTS prices (
+        id INTEGER PRIMARY KEY,
+        ingredient TEXT UNIQUE NOT NULL,
+        price REAL NOT NULL,
+        unit TEXT NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )''')
+
+    conn.commit()
+    conn.close()
+
+
+def save_recipe(name: str, category: str, ingredients: List[Dict]):
+    """Сохраняет рецепт в БД"""
+    conn = sqlite3.connect('recipes.db')
+    c = conn.cursor()
+
+    import json
+    ingredients_json = json.dumps(ingredients)
+
+    c.execute('''INSERT INTO recipes (name, category, ingredients)
+                 VALUES (?, ?, ?)''', (name, category, ingredients_json))
+
+    conn.commit()
+    conn.close()
+
+
+def get_recipes(category: Optional[str] = None) -> List[Dict]:
+    """Получает рецепты из БД"""
+    conn = sqlite3.connect('recipes.db')
+    c = conn.cursor()
+
+    if category:
+        c.execute('''SELECT id, name, category, ingredients, created_at
+                     FROM recipes WHERE category = ?
+                     ORDER BY created_at DESC''', (category,))
+    else:
+        c.execute('''SELECT id, name, category, ingredients, created_at
+                     FROM recipes ORDER BY created_at DESC''')
+
+    rows = c.fetchall()
+    conn.close()
+
+    recipes = []
+    for row in rows:
+        import json
+        recipes.append({
+            'id': row[0],
+            'name': row[1],
+            'category': row[2],
+            'ingredients': json.loads(row[3]),
+            'created_at': row[4]
+        })
+
+    return recipes
+
+
+def delete_recipe(recipe_id: int):
+    """Удаляет рецепт"""
+    conn = sqlite3.connect('recipes.db')
+    c = conn.cursor()
+    c.execute('DELETE FROM recipes WHERE id = ?', (recipe_id,))
+    conn.commit()
+    conn.close()
+
+
+def save_prices(prices: Dict[str, Dict]):
+    """Сохраняет цены"""
+    conn = sqlite3.connect('recipes.db')
+    c = conn.cursor()
+
+    for ingredient, data in prices.items():
+        c.execute('''INSERT OR REPLACE INTO prices (ingredient, price, unit)
+                     VALUES (?, ?, ?)''',
+                  (ingredient, data['price'], data['unit']))
+
+    conn.commit()
+    conn.close()
+
+
+def get_prices() -> Dict[str, Dict]:
+    """Получает цены"""
+    conn = sqlite3.connect('recipes.db')
+    c = conn.cursor()
+
+    c.execute('SELECT ingredient, price, unit FROM prices')
+    rows = c.fetchall()
+    conn.close()
+
+    prices = {}
+    for row in rows:
+        prices[row[0]] = {'price': row[1], 'unit': row[2]}
+
+    return prices
+
+
+# ============================================================================
+# ПАРСИНГ РЕЦЕПТОВ И ИНГРЕДИЕНТОВ
 # ============================================================================
 
 def get_video_id(url: str) -> Optional[str]:
@@ -49,12 +166,10 @@ def get_subtitles_ytdlp(video_url: str) -> Optional[str]:
             if not info.get('subtitles'):
                 return None
 
-            # Берем первый доступный язык
             subs_dict = info['subtitles']
             if not subs_dict:
                 return None
 
-            # Пробуем русский, потом английский, потом первый доступный
             subs = None
             for lang in ['ru', 'en']:
                 if lang in subs_dict:
@@ -64,7 +179,6 @@ def get_subtitles_ytdlp(video_url: str) -> Optional[str]:
             if not subs:
                 subs = list(subs_dict.values())[0]
 
-            # Загружаем VTT файл
             if subs and len(subs) > 0:
                 vtt_url = subs[0].get('url') or subs[0].get('data')
 
@@ -76,10 +190,8 @@ def get_subtitles_ytdlp(video_url: str) -> Optional[str]:
                     else:
                         return None
                 else:
-                    # Если это встроенные данные
                     subtitle_text = vtt_url if isinstance(vtt_url, str) else ''
 
-                # Парсим VTT в обычный текст
                 lines = subtitle_text.split('\n')
                 transcript = []
 
@@ -96,14 +208,11 @@ def get_subtitles_ytdlp(video_url: str) -> Optional[str]:
 
         return None
 
-    except ImportError:
-        st.error("❌ yt-dlp не установлен. Это не должно было произойти. Перезагрузите приложение.")
-        return None
-    except Exception as e:
+    except:
         return None
 
 
-def find_ingredients(text: str) -> list:
+def find_ingredients(text: str) -> List[Dict]:
     """Находит ингредиенты в тексте"""
     pattern = r'(\d+(?:\.\d+)?)\s*(г|мл|шт|ст\.л|ч\.л|л|кг)\s+([а-яa-z\s]+?)(?=[.,:;]|$)'
 
@@ -123,175 +232,216 @@ def find_ingredients(text: str) -> list:
 
 
 # ============================================================================
+# ИНИЦИАЛИЗАЦИЯ
+# ============================================================================
+
+init_db()
+
+CATEGORIES = ["Супы", "Вторые блюда", "Десерты и выпечка", "Консервация", "Колбасы", "Напитки", "Разное"]
+
+# ============================================================================
 # ИНТЕРФЕЙС
 # ============================================================================
 
-tab1, tab2 = st.tabs(["📺 Загрузка видео", "💰 Расчет стоимости"])
+tab1, tab2, tab3 = st.tabs(["📺 Загрузка", "📋 Рецепты", "💰 Цены"])
+
+# ============================================================================
+# ВКЛАДКА 1: ЗАГРУЗКА
+# ============================================================================
 
 with tab1:
-    st.subheader("Шаг 1: Вставьте ссылку на видео")
+    st.subheader("Загрузка рецепта")
 
-    col1, col2 = st.columns([4, 1])
+    input_mode = st.radio("Источник рецепта:", ["YouTube видео", "Текстовый рецепт"], horizontal=True)
 
-    with col1:
-        video_url = st.text_input(
-            "YouTube ссылка",
-            placeholder="https://youtube.com/watch?v=...",
-            label_visibility="collapsed"
-        )
+    if input_mode == "YouTube видео":
+        video_url = st.text_input("YouTube ссылка:", placeholder="https://youtube.com/watch?v=...")
 
-    with col2:
-        load_button = st.button("🔄 Загрузить", type="primary", use_container_width=True)
+        if st.button("🔄 Загрузить субтитры", type="primary", use_container_width=True):
+            if not video_url.strip():
+                st.error("❌ Введите ссылку")
+            else:
+                with st.spinner("⏳ Загружаю субтитры..."):
+                    transcript = get_subtitles_ytdlp(video_url)
 
-    if load_button:
-        if not video_url.strip():
-            st.error("❌ Введите ссылку")
-        else:
-            try:
-                video_id = get_video_id(video_url)
-
-                if not video_id:
-                    st.error("❌ Это не YouTube ссылка")
+                if transcript:
+                    st.success("✅ Загружено!")
+                    st.session_state.transcript = transcript
+                    st.session_state.ingredients = find_ingredients(transcript)
                 else:
-                    with st.spinner("⏳ Загружаю субтитры (может занять 15-30 сек)..."):
-                        transcript = get_subtitles_ytdlp(video_url)
+                    st.error("❌ Не удалось загрузить субтитры")
 
-                    if transcript:
-                        st.success("✅ Загружено!")
-
-                        st.text_area(
-                            "Текст видео",
-                            value=transcript,
-                            height=200,
-                            disabled=True
-                        )
-
-                        st.subheader("🥘 Найденные ингредиенты:")
-                        ingredients = find_ingredients(transcript)
-
-                        if ingredients:
-                            for ing in ingredients:
-                                st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']}")
-
-                            st.session_state.ingredients = ingredients
-                            st.session_state.transcript = transcript
-                            st.info("✅ Перейдите на вкладку 'Расчет стоимости'")
-                        else:
-                            st.warning("⚠️ Ингредиенты не найдены в видео")
-
-                    else:
-                        st.error("""
-❌ Не удалось загрузить субтитры.
-
-**Возможные причины:**
-1. Видео без встроенных субтитров
-2. Видео приватное или удалено
-3. Ошибка сети
-
-**Решение:**
-- Проверьте кнопку CC на YouTube
-- Выберите другое видео
-- Подождите 5 минут и попробуйте снова
-                        """)
-
-            except Exception as e:
-                st.error(f"❌ Ошибка: {str(e)}")
-
-with tab2:
-    st.subheader("Шаг 2: Введите цены ингредиентов")
-
-    if 'ingredients' not in st.session_state or not st.session_state.ingredients:
-        st.info("📌 Сначала загрузите видео на вкладке слева")
     else:
+        recipe_text = st.text_area("Вставьте текст рецепта:", height=300, placeholder="Вставьте текст рецепта сюда...")
+
+        if st.button("📝 Обработать текст", type="primary", use_container_width=True):
+            if not recipe_text.strip():
+                st.error("❌ Введите текст")
+            else:
+                st.session_state.transcript = recipe_text
+                st.session_state.ingredients = find_ingredients(recipe_text)
+                st.success("✅ Текст обработан!")
+
+    # Если есть загруженные данные
+    if 'transcript' in st.session_state and st.session_state.transcript:
+        st.divider()
+        st.subheader("🥘 Найденные ингредиенты:")
+
         ingredients = st.session_state.ingredients
 
-        try:
-            col1, col2, col3 = st.columns(3)
+        if ingredients:
+            for ing in ingredients:
+                st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']}")
 
-            prices = {}
-            for i, ing in enumerate(ingredients):
-                if i % 3 == 0:
-                    col = col1
-                elif i % 3 == 1:
-                    col = col2
+            # Сохранение рецепта
+            st.divider()
+            st.subheader("💾 Сохранить рецепт")
+
+            recipe_name = st.text_input("Название рецепта:", placeholder="Например: Борщ украинский")
+            category = st.selectbox("Категория:", CATEGORIES)
+
+            if st.button("💾 Сохранить", type="primary", use_container_width=True):
+                if not recipe_name.strip():
+                    st.error("❌ Введите название рецепта")
                 else:
-                    col = col3
+                    save_recipe(recipe_name, category, ingredients)
+                    st.success(f"✅ Рецепт '{recipe_name}' сохранен в категорию '{category}'!")
 
-                with col:
-                    price = st.number_input(
-                        f"{ing['name']}",
-                        value=100.0,
-                        min_value=0.0,
-                        step=10.0,
-                        key=f"price_{i}"
-                    )
-                    prices[ing['name']] = price
+                    # Очищаем состояние
+                    del st.session_state.transcript
+                    del st.session_state.ingredients
 
-            if st.button("🧮 Рассчитать стоимость", type="primary", use_container_width=True):
-                st.subheader("📊 Результат")
+        else:
+            st.warning("⚠️ Ингредиенты не найдены")
 
-                total_cost = 0
-                details = []
+# ============================================================================
+# ВКЛАДКА 2: РЕЦЕПТЫ
+# ============================================================================
 
-                for ing in ingredients:
-                    price_per_unit = prices[ing['name']]
+with tab2:
+    st.subheader("📋 Сохраненные рецепты")
 
-                    if ing['unit'] == 'кг':
-                        weight = ing['quantity'] * 1000
-                    elif ing['unit'] == 'л':
-                        weight = ing['quantity'] * 1000
-                    else:
-                        weight = ing['quantity']
+    # Фильтр по категории
+    filter_category = st.selectbox("Фильтр по категории:", ["Все"] + CATEGORIES)
 
-                    if ing['unit'] in ['г', 'мл']:
-                        cost = (weight / 1000) * price_per_unit
-                    else:
-                        cost = ing['quantity'] * price_per_unit
+    if filter_category == "Все":
+        recipes = get_recipes()
+    else:
+        recipes = get_recipes(filter_category)
 
-                    total_cost += cost
+    if recipes:
+        for recipe in recipes:
+            with st.expander(f"📄 {recipe['name']} ({recipe['category']})"):
+                st.write(f"**Дата добавления:** {recipe['created_at']}")
 
-                    details.append({
-                        "Ингредиент": ing['name'],
-                        "Количество": f"{ing['quantity']} {ing['unit']}",
-                        "Цена за единицу": f"{price_per_unit} ₽",
-                        "Стоимость": f"{cost:.2f} ₽"
-                    })
+                st.write("**Ингредиенты:**")
+                for ing in recipe['ingredients']:
+                    st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']}")
 
-                import pandas as pd
-                df = pd.DataFrame(details)
-                st.dataframe(df, use_container_width=True, hide_index=True)
-
-                st.divider()
-                col1, col2, col3 = st.columns(3)
+                # Действия
+                col1, col2 = st.columns([1, 1])
 
                 with col1:
-                    st.metric("💵 Общая стоимость", f"{total_cost:.2f} ₽")
+                    if st.button("🗑️ Удалить", key=f"delete_{recipe['id']}", use_container_width=True):
+                        delete_recipe(recipe['id'])
+                        st.success("✅ Рецепт удален")
+                        st.rerun()
 
-                with col2:
-                    st.metric("📊 Ингредиентов", len(ingredients))
+    else:
+        st.info("📌 Рецептов нет. Загрузите рецепт в вкладке 'Загрузка'")
 
-                with col3:
-                    st.metric("💹 За блюдо", f"{total_cost:.0f} ₽")
+# ============================================================================
+# ВКЛАДКА 3: ЦЕНЫ
+# ============================================================================
 
-                report = f"""
-ОТЧЕТ: Себестоимость блюда
-=====================================
+with tab3:
+    st.subheader("💰 Управление ценами")
 
-ИНГРЕДИЕНТЫ:
-"""
-                for detail in details:
-                    report += f"\n{detail['Ингредиент']}: {detail['Количество']} = {detail['Стоимость']}"
+    # Загрузка прайс-листа
+    st.write("**Загрузить прайс-лист:**")
 
-                report += f"\n\nОБЩАЯ СТОИМОСТЬ: {total_cost:.2f} ₽"
+    uploaded_file = st.file_uploader("Выберите текстовый файл с ценами (.txt, .csv)", type=["txt", "csv"])
 
-                st.download_button(
-                    "📥 Скачать отчет",
-                    data=report,
-                    file_name="recipe_cost.txt",
-                    mime="text/plain",
-                    use_container_width=True
-                )
+    if uploaded_file:
+        try:
+            content = uploaded_file.read().decode('utf-8')
+
+            # Парсим прайс-лист (формат: название\tцена\tединица или название,цена,единица)
+            lines = content.strip().split('\n')
+            prices = {}
+
+            for line in lines:
+                if '\t' in line:
+                    parts = line.split('\t')
+                elif ',' in line:
+                    parts = line.split(',')
+                else:
+                    continue
+
+                if len(parts) >= 3:
+                    ingredient = parts[0].strip()
+                    try:
+                        price = float(parts[1].strip())
+                        unit = parts[2].strip()
+                        prices[ingredient] = {'price': price, 'unit': unit}
+                    except:
+                        continue
+
+            if prices:
+                st.success(f"✅ Найдено {len(prices)} позиций")
+
+                if st.button("💾 Сохранить цены", type="primary", use_container_width=True):
+                    save_prices(prices)
+                    st.success("✅ Цены сохранены!")
+
+                # Показываем загруженные цены
+                df = pd.DataFrame([
+                    {'Ингредиент': k, 'Цена': v['price'], 'Единица': v['unit']}
+                    for k, v in prices.items()
+                ])
+                st.dataframe(df, use_container_width=True)
+
+            else:
+                st.error("❌ Не удалось распознать формат файла")
 
         except Exception as e:
-            st.error(f"❌ Ошибка при расчете: {str(e)}")
+            st.error(f"❌ Ошибка при загрузке: {e}")
 
+    st.divider()
+
+    # Текущие цены
+    st.write("**Текущие цены в системе:**")
+
+    current_prices = get_prices()
+
+    if current_prices:
+        df = pd.DataFrame([
+            {'Ингредиент': k, 'Цена': v['price'], 'Единица': v['unit']}
+            for k, v in current_prices.items()
+        ])
+        st.dataframe(df, use_container_width=True)
+
+        # Возможность ручного редактирования
+        st.write("**Добавить/изменить цену вручную:**")
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            ing_name = st.text_input("Ингредиент:", placeholder="Например: молоко")
+
+        with col2:
+            ing_price = st.number_input("Цена:", min_value=0.0, step=10.0)
+
+        with col3:
+            ing_unit = st.selectbox("Единица:", ["г", "мл", "шт", "л", "кг"])
+
+        if st.button("➕ Добавить цену", use_container_width=True):
+            if ing_name.strip():
+                save_prices({ing_name: {'price': ing_price, 'unit': ing_unit}})
+                st.success(f"✅ Цена для '{ing_name}' добавлена!")
+                st.rerun()
+
+    else:
+        st.info("📌 Цены не загружены. Загрузите прайс-лист выше")
+
+        
