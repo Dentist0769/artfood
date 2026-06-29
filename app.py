@@ -1,7 +1,8 @@
-
 """
-🍳 КАЛЬКУЛЯТОР СЕБЕСТОИМОСТИ БЛЮД (ПРОФЕССИОНАЛЬНАЯ ВЕРСИЯ)
-3 вкладки: Загрузка, Рецепты, Цены
+🍳 КАЛЬКУЛЯТОР СЕБЕСТОИМОСТИ БЛЮД (ИСПРАВЛЕННАЯ PRO)
+- Загрузка описания видео
+- Парсинг из описания ИЛИ субтитров
+- Улучшенная обработка ошибок
 """
 
 import streamlit as st
@@ -9,7 +10,6 @@ import re
 import sqlite3
 from typing import Optional, List, Dict
 import pandas as pd
-from datetime import datetime
 
 st.set_page_config(page_title="🍳 Кулинарный калькулятор PRO", layout="wide")
 
@@ -25,7 +25,6 @@ def init_db():
     conn = sqlite3.connect('recipes.db')
     c = conn.cursor()
 
-    # Таблица рецептов
     c.execute('''CREATE TABLE IF NOT EXISTS recipes (
         id INTEGER PRIMARY KEY,
         name TEXT NOT NULL,
@@ -34,7 +33,6 @@ def init_db():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
 
-    # Таблица цен
     c.execute('''CREATE TABLE IF NOT EXISTS prices (
         id INTEGER PRIMARY KEY,
         ingredient TEXT UNIQUE NOT NULL,
@@ -132,7 +130,7 @@ def get_prices() -> Dict[str, Dict]:
 
 
 # ============================================================================
-# ПАРСИНГ РЕЦЕПТОВ И ИНГРЕДИЕНТОВ
+# РАБОТА С YOUTUBE
 # ============================================================================
 
 def get_video_id(url: str) -> Optional[str]:
@@ -145,8 +143,8 @@ def get_video_id(url: str) -> Optional[str]:
         return None
 
 
-def get_subtitles_ytdlp(video_url: str) -> Optional[str]:
-    """Загружает субтитры через yt-dlp"""
+def get_youtube_data(video_url: str) -> Dict:
+    """Получает описание и субтитры видео"""
     try:
         import yt_dlp
 
@@ -156,77 +154,91 @@ def get_subtitles_ytdlp(video_url: str) -> Optional[str]:
             'writesubtitles': True,
             'skip_download': True,
             'subtitlesformat': 'vtt',
-            'outtmpl': '/tmp/%(id)s',
             'socket_timeout': 15,
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video_url, download=False)
 
-            if not info.get('subtitles'):
-                return None
+            # Описание видео
+            description = info.get('description', '')
 
-            subs_dict = info['subtitles']
-            if not subs_dict:
-                return None
+            # Субтитры
+            transcript = None
+            if info.get('subtitles'):
+                subs_dict = info['subtitles']
+                if subs_dict:
+                    subs = None
+                    for lang in ['ru', 'en']:
+                        if lang in subs_dict:
+                            subs = subs_dict[lang]
+                            break
 
-            subs = None
-            for lang in ['ru', 'en']:
-                if lang in subs_dict:
-                    subs = subs_dict[lang]
-                    break
+                    if not subs:
+                        subs = list(subs_dict.values())[0]
 
-            if not subs:
-                subs = list(subs_dict.values())[0]
+                    if subs and len(subs) > 0:
+                        vtt_url = subs[0].get('url') or subs[0].get('data')
 
-            if subs and len(subs) > 0:
-                vtt_url = subs[0].get('url') or subs[0].get('data')
+                        if vtt_url and isinstance(vtt_url, str) and vtt_url.startswith('http'):
+                            import requests
+                            response = requests.get(vtt_url, timeout=10)
+                            if response.status_code == 200:
+                                subtitle_text = response.text
 
-                if vtt_url and isinstance(vtt_url, str) and vtt_url.startswith('http'):
-                    import requests
-                    response = requests.get(vtt_url, timeout=10)
-                    if response.status_code == 200:
-                        subtitle_text = response.text
-                    else:
-                        return None
-                else:
-                    subtitle_text = vtt_url if isinstance(vtt_url, str) else ''
+                                lines = subtitle_text.split('\n')
+                                transcript_list = []
 
-                lines = subtitle_text.split('\n')
-                transcript = []
+                                for line in lines:
+                                    if (line.strip() and
+                                        not line.startswith('WEBVTT') and
+                                        '-->' not in line and
+                                        not re.match(r'^\d{2}:\d{2}', line)):
+                                        clean = re.sub(r'<[^>]+>', '', line).strip()
+                                        if clean:
+                                            transcript_list.append(clean)
 
-                for line in lines:
-                    if (line.strip() and
-                        not line.startswith('WEBVTT') and
-                        '-->' not in line and
-                        not re.match(r'^\d{2}:\d{2}', line)):
-                        clean = re.sub(r'<[^>]+>', '', line).strip()
-                        if clean:
-                            transcript.append(clean)
+                                transcript = ' '.join(transcript_list)
 
-                return ' '.join(transcript)
+            return {
+                'description': description,
+                'transcript': transcript,
+                'title': info.get('title', 'Unknown')
+            }
 
-        return None
-
-    except:
-        return None
+    except Exception as e:
+        return {
+            'description': '',
+            'transcript': None,
+            'title': 'Unknown',
+            'error': str(e)
+        }
 
 
 def find_ingredients(text: str) -> List[Dict]:
     """Находит ингредиенты в тексте"""
+    if not text:
+        return []
+
     pattern = r'(\d+(?:\.\d+)?)\s*(г|мл|шт|ст\.л|ч\.л|л|кг)\s+([а-яa-z\s]+?)(?=[.,:;]|$)'
 
     ingredients = []
+    seen = set()
+
     for match in re.finditer(pattern, text, re.IGNORECASE):
         quantity = float(match.group(1))
         unit = match.group(2).lower()
-        name = match.group(3).strip()
+        name = match.group(3).strip().lower()
 
-        ingredients.append({
-            'name': name,
-            'quantity': quantity,
-            'unit': unit
-        })
+        # Избегаем дубликатов
+        key = f"{name}_{unit}"
+        if key not in seen:
+            ingredients.append({
+                'name': name,
+                'quantity': quantity,
+                'unit': unit
+            })
+            seen.add(key)
 
     return ingredients
 
@@ -257,19 +269,38 @@ with tab1:
     if input_mode == "YouTube видео":
         video_url = st.text_input("YouTube ссылка:", placeholder="https://youtube.com/watch?v=...")
 
-        if st.button("🔄 Загрузить субтитры", type="primary", use_container_width=True):
+        if st.button("🔄 Загрузить", type="primary", use_container_width=True):
             if not video_url.strip():
                 st.error("❌ Введите ссылку")
             else:
-                with st.spinner("⏳ Загружаю субтитры..."):
-                    transcript = get_subtitles_ytdlp(video_url)
+                with st.spinner("⏳ Загружаю данные видео..."):
+                    data = get_youtube_data(video_url)
 
-                if transcript:
-                    st.success("✅ Загружено!")
-                    st.session_state.transcript = transcript
-                    st.session_state.ingredients = find_ingredients(transcript)
+                if data.get('error'):
+                    st.error(f"❌ Ошибка: {data['error']}")
                 else:
-                    st.error("❌ Не удалось загрузить субтитры")
+                    st.success("✅ Данные загружены!")
+
+                    # Сначала парсим описание
+                    ingredients_from_desc = find_ingredients(data['description'])
+
+                    # Если в описании мало ингредиентов - парсим субтитры
+                    if len(ingredients_from_desc) < 3 and data['transcript']:
+                        ingredients_from_subs = find_ingredients(data['transcript'])
+                        # Берем ингредиенты из субтитров
+                        ingredients = ingredients_from_subs
+                        source = "Субтитры"
+                    else:
+                        ingredients = ingredients_from_desc
+                        source = "Описание видео"
+
+                    if ingredients:
+                        st.info(f"📍 Источник: **{source}**")
+                        st.session_state.transcript = data['description'] or data['transcript'] or ""
+                        st.session_state.ingredients = ingredients
+                        st.session_state.video_title = data['title']
+                    else:
+                        st.warning("⚠️ Ингредиенты не найдены ни в описании, ни в субтитрах")
 
     else:
         recipe_text = st.text_area("Вставьте текст рецепта:", height=300, placeholder="Вставьте текст рецепта сюда...")
@@ -280,39 +311,41 @@ with tab1:
             else:
                 st.session_state.transcript = recipe_text
                 st.session_state.ingredients = find_ingredients(recipe_text)
+                st.session_state.video_title = "Текстовый рецепт"
                 st.success("✅ Текст обработан!")
 
     # Если есть загруженные данные
-    if 'transcript' in st.session_state and st.session_state.transcript:
+    if 'transcript' in st.session_state and st.session_state.ingredients:
         st.divider()
         st.subheader("🥘 Найденные ингредиенты:")
 
         ingredients = st.session_state.ingredients
 
-        if ingredients:
-            for ing in ingredients:
-                st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']}")
+        for ing in ingredients:
+            st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']}")
 
-            # Сохранение рецепта
-            st.divider()
-            st.subheader("💾 Сохранить рецепт")
+        # Сохранение рецепта
+        st.divider()
+        st.subheader("💾 Сохранить рецепт")
 
-            recipe_name = st.text_input("Название рецепта:", placeholder="Например: Борщ украинский")
-            category = st.selectbox("Категория:", CATEGORIES)
+        # Предлагаем название из видео
+        default_name = st.session_state.get('video_title', '')
 
-            if st.button("💾 Сохранить", type="primary", use_container_width=True):
-                if not recipe_name.strip():
-                    st.error("❌ Введите название рецепта")
-                else:
-                    save_recipe(recipe_name, category, ingredients)
-                    st.success(f"✅ Рецепт '{recipe_name}' сохранен в категорию '{category}'!")
+        recipe_name = st.text_input("Название рецепта:", value=default_name, placeholder="Например: Борщ украинский")
+        category = st.selectbox("Категория:", CATEGORIES)
 
-                    # Очищаем состояние
+        if st.button("💾 Сохранить", type="primary", use_container_width=True):
+            if not recipe_name.strip():
+                st.error("❌ Введите название рецепта")
+            else:
+                save_recipe(recipe_name, category, ingredients)
+                st.success(f"✅ Рецепт '{recipe_name}' сохранен!")
+
+                # Очищаем состояние
+                if 'transcript' in st.session_state:
                     del st.session_state.transcript
+                if 'ingredients' in st.session_state:
                     del st.session_state.ingredients
-
-        else:
-            st.warning("⚠️ Ингредиенты не найдены")
 
 # ============================================================================
 # ВКЛАДКА 2: РЕЦЕПТЫ
@@ -321,7 +354,6 @@ with tab1:
 with tab2:
     st.subheader("📋 Сохраненные рецепты")
 
-    # Фильтр по категории
     filter_category = st.selectbox("Фильтр по категории:", ["Все"] + CATEGORIES)
 
     if filter_category == "Все":
@@ -338,7 +370,6 @@ with tab2:
                 for ing in recipe['ingredients']:
                     st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']}")
 
-                # Действия
                 col1, col2 = st.columns([1, 1])
 
                 with col1:
@@ -357,7 +388,6 @@ with tab2:
 with tab3:
     st.subheader("💰 Управление ценами")
 
-    # Загрузка прайс-листа
     st.write("**Загрузить прайс-лист:**")
 
     uploaded_file = st.file_uploader("Выберите текстовый файл с ценами (.txt, .csv)", type=["txt", "csv"])
@@ -366,7 +396,6 @@ with tab3:
         try:
             content = uploaded_file.read().decode('utf-8')
 
-            # Парсим прайс-лист (формат: название\tцена\tединица или название,цена,единица)
             lines = content.strip().split('\n')
             prices = {}
 
@@ -394,7 +423,6 @@ with tab3:
                     save_prices(prices)
                     st.success("✅ Цены сохранены!")
 
-                # Показываем загруженные цены
                 df = pd.DataFrame([
                     {'Ингредиент': k, 'Цена': v['price'], 'Единица': v['unit']}
                     for k, v in prices.items()
@@ -409,7 +437,6 @@ with tab3:
 
     st.divider()
 
-    # Текущие цены
     st.write("**Текущие цены в системе:**")
 
     current_prices = get_prices()
@@ -421,7 +448,6 @@ with tab3:
         ])
         st.dataframe(df, use_container_width=True)
 
-        # Возможность ручного редактирования
         st.write("**Добавить/изменить цену вручную:**")
 
         col1, col2, col3 = st.columns(3)
@@ -443,5 +469,7 @@ with tab3:
 
     else:
         st.info("📌 Цены не загружены. Загрузите прайс-лист выше")
+
+
 
         
