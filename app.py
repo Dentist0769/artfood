@@ -98,63 +98,62 @@ def get_video_id(url: str) -> Optional[str]:
     except:
         return None
 
+def clean_description(text: str) -> str:
+    """Очищает описание от ссылок, рекламы и мусора"""
+
+    # Удаляем ссылки
+    text = re.sub(r'https?://[^\s]+', '', text)
+    text = re.sub(r'www\.[^\s]+', '', text)
+
+    # Удаляем текст с рекламой/мусором
+    spam_patterns = [
+        r'(?:подпиш|subscribe|follow).*?(?:\n|$)',
+        r'(?:telegram|tg|канал|channel).*?(?:\n|$)',
+        r'(?:монобанк|карта|реквизиты|доставка).*?(?:\n|$)',
+        r'(?:промокод|скидка|promo).*?(?:\n|$)',
+        r'(?:как это было сделано|расшифровка|subtitles).*?(?:\n|$)',
+    ]
+
+    for pattern in spam_patterns:
+        text = re.sub(pattern, '', text, flags=re.IGNORECASE)
+
+    # Удаляем множественные пробелы и пустые строки
+    text = re.sub(r'\n+', '\n', text)
+    text = re.sub(r' +', ' ', text)
+
+    return text.strip()
+
 def get_youtube_data(video_url: str) -> Dict:
+    """Получает описание видео и закрепленный комментарий"""
     try:
         import yt_dlp
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
-            'writesubtitles': True,
-            'skip_download': True,
-            'subtitlesformat': 'vtt',
             'socket_timeout': 15,
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video_url, download=False)
             description = info.get('description', '')
-            transcript = None
 
-            if info.get('subtitles'):
-                subs_dict = info['subtitles']
-                if subs_dict:
-                    subs = None
-                    for lang in ['ru', 'en']:
-                        if lang in subs_dict:
-                            subs = subs_dict[lang]
-                            break
-                    if not subs:
-                        subs = list(subs_dict.values())[0]
-                    if subs and len(subs) > 0:
-                        vtt_url = subs[0].get('url') or subs[0].get('data')
-                        if vtt_url and isinstance(vtt_url, str) and vtt_url.startswith('http'):
-                            import requests
-                            response = requests.get(vtt_url, timeout=10)
-                            if response.status_code == 200:
-                                subtitle_text = response.text
-                                lines = subtitle_text.split('\n')
-                                transcript_list = []
-                                for line in lines:
-                                    if (line.strip() and not line.startswith('WEBVTT') and
-                                        '-->' not in line and not re.match(r'^\d{2}:\d{2}', line)):
-                                        clean = re.sub(r'<[^>]+>', '', line).strip()
-                                        if clean:
-                                            transcript_list.append(clean)
-                                transcript = ' '.join(transcript_list)
+            # Очищаем описание
+            clean_desc = clean_description(description)
 
             return {
-                'description': description,
-                'transcript': transcript,
-                'title': info.get('title', 'Unknown')
+                'description': clean_desc,
+                'title': info.get('title', 'Unknown'),
+                'comments': None  # Для будущего использования
             }
     except Exception as e:
         return {
             'description': '',
-            'transcript': None,
             'title': 'Unknown',
+            'comments': None,
             'error': str(e)
         }
 
 def get_page_text(url: str) -> Optional[str]:
+    """Парсит текст со страницы по ссылке"""
     try:
         import requests
         from bs4 import BeautifulSoup
@@ -176,6 +175,7 @@ def get_page_text(url: str) -> Optional[str]:
         return None
 
 def find_ingredients(text: str) -> List[Dict]:
+    """Находит ингредиенты в тексте"""
     if not text:
         return []
 
@@ -263,28 +263,25 @@ with tab1:
             if not video_url.strip():
                 st.error("❌ Введите ссылку")
             else:
-                with st.spinner("⏳ Загружаю данные видео..."):
+                with st.spinner("⏳ Загружаю описание видео..."):
                     data = get_youtube_data(video_url)
 
                 if data.get('error'):
                     st.error(f"❌ Ошибка: {data['error']}")
                 else:
-                    st.success("✅ Данные загружены!")
-                    ingredients_from_desc = find_ingredients(data['description'])
-                    if len(ingredients_from_desc) < 5 and data['transcript']:
-                        ingredients = find_ingredients(data['transcript'])
-                        source = "Субтитры видео"
-                    else:
-                        ingredients = ingredients_from_desc
-                        source = "Описание видео"
+                    st.success("✅ Описание загружено!")
+
+                    # Ищем рецепт в очищенном описании
+                    ingredients = find_ingredients(data['description'])
 
                     if ingredients:
-                        st.info(f"📍 Источник: **{source}** ({len(ingredients)} ингредиентов)")
+                        st.info(f"✅ Найдено ингредиентов: {len(ingredients)}")
                         st.session_state.ingredients = ingredients
                         st.session_state.video_url = video_url
                         st.session_state.video_title = data['title']
                     else:
-                        st.warning("⚠️ Ингредиенты не найдены ни в описании, ни в субтитрах")
+                        st.warning("⚠️ Рецепт не найден в очищенном описании")
+                        st.info("💡 Совет: Проверьте видео — там может быть рецепт в закрепленном комментарии")
 
     else:
         page_url = st.text_input("Ссылка на страницу:", placeholder="https://example.com/recipe...")
@@ -299,7 +296,7 @@ with tab1:
                     st.success("✅ Страница загружена!")
                     ingredients = find_ingredients(page_text)
                     if ingredients:
-                        st.info(f"📍 Найдено ингредиентов: {len(ingredients)}")
+                        st.info(f"✅ Найдено ингредиентов: {len(ingredients)}")
                         st.session_state.ingredients = ingredients
                         st.session_state.video_url = page_url
                         st.session_state.video_title = "Рецепт со страницы"
@@ -418,4 +415,5 @@ with tab3:
                 st.rerun()
     else:
         st.info("📌 Цены не загружены. Загрузите прайс-лист выше")
+
 
