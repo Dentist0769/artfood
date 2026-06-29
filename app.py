@@ -225,8 +225,6 @@ def find_ingredients(text: str) -> List[Dict]:
                      'градусе', 'целью', 'цвет', 'время', 'температу', 'температур', 'процесс',
                      'духов', 'духовк', 'разогреть', 'выпекать', 'оставить', 'смешать', 'взбить'}
 
-    pattern = r'(\d+(?:[.,]\d+)?)\s*(?:мл|ml|г|g|мг|mg|кг|kg|шт|pcs|л|l|ст\.л|tbsp|ч\.л|tsp|миллилитр|грамм|килограмм|штук|литр)\s+([а-яa-z\s]+?)(?=[,;.!?\n]|$)'
-
     units_map = {
         'мл': 'мл', 'ml': 'мл', 'миллилитр': 'мл', 'миллилитра': 'мл', 'миллилитров': 'мл',
         'г': 'г', 'g': 'г', 'грамм': 'г', 'грамма': 'г', 'граммов': 'г',
@@ -234,53 +232,69 @@ def find_ingredients(text: str) -> List[Dict]:
         'л': 'л', 'l': 'л', 'литр': 'л', 'литра': 'л', 'литров': 'л',
         'мг': 'мг', 'mg': 'мг',
         'шт': 'шт', 'pcs': 'шт', 'штук': 'шт', 'штука': 'шт', 'штуки': 'шт',
-        'ст.л': 'ст.л', 'tbsp': 'ст.л', 'столов': 'ст.л',
+        'ст.л': 'ст.л', 'tbsp': 'ст.л', 'столов': 'ст.л', 'ложк': 'ст.л',
         'ч.л': 'ч.л', 'tsp': 'ч.л', 'чайн': 'ч.л',
     }
 
-    for match in re.finditer(pattern, text, re.IGNORECASE):
+    # Паттерн 1: "400 г муки" (количество + единица + ингредиент)
+    pattern1 = r'(\d+(?:[.,]\d+)?)\s*(?:мл|ml|г|g|мг|mg|кг|kg|шт|pcs|л|l|ст\.л|tbsp|ч\.л|tsp|миллилитр|грамм|килограмм|штук|литр|ложки|ложки)\s+([а-яa-z\s]+?)(?=[,;.!?\n—]|$)'
+
+    # Паттерн 2: "мука — 400 г" (ингредиент — количество + единица)
+    pattern2 = r'([а-яa-z\s]+?)\s*—\s*(\d+(?:[.,]\d+)?)\s*(?:мл|ml|г|g|мг|mg|кг|kg|шт|pcs|л|l|ст\.л|tbsp|ч\.л|tsp|миллилитр|грамм|килограмм|штук|литр|ложки)'
+
+    def add_ingredient(name: str, quantity: float, full_match: str):
+        """Добавляет ингредиент если он прошел все фильтры"""
+        skip = False
+        for excl in exclude_words:
+            if excl in name:
+                skip = True
+                break
+
+        if skip:
+            return
+
+        unit = 'шт'
+        for unit_key, unit_val in units_map.items():
+            if unit_key.lower() in full_match.lower():
+                unit = unit_val
+                break
+
+        name = re.sub(r'[,;.!?—]', '', name).strip()
+
+        if len(name) < 2 or len(name) > 50:
+            return
+
+        if not any(c.isalpha() for c in name):
+            return
+
+        key = f"{name}_{unit}"
+        if key not in seen and quantity > 0 and quantity < 10000:
+            ingredients.append({
+                'name': name,
+                'quantity': quantity,
+                'unit': unit
+            })
+            seen.add(key)
+
+    # Применяем паттерн 1
+    for match in re.finditer(pattern1, text, re.IGNORECASE):
         try:
             quantity_str = match.group(1).replace(',', '.')
             quantity = float(quantity_str)
-
-            if len(match.groups()) >= 2:
-                name = match.group(2).strip().lower()
-            else:
-                continue
-
-            skip = False
-            for excl in exclude_words:
-                if excl in name:
-                    skip = True
-                    break
-
-            if skip:
-                continue
-
+            name = match.group(2).strip().lower()
             full_match = match.group(0)
-            unit = 'шт'
-            for unit_key, unit_val in units_map.items():
-                if unit_key.lower() in full_match.lower():
-                    unit = unit_val
-                    break
+            add_ingredient(name, quantity, full_match)
+        except (ValueError, IndexError):
+            continue
 
-            name = re.sub(r'[,;.!?]', '', name).strip()
-
-            if len(name) < 2 or len(name) > 50:
-                continue
-
-            if not any(c.isalpha() for c in name):
-                continue
-
-            key = f"{name}_{unit}"
-            if key not in seen and quantity > 0 and quantity < 10000:
-                ingredients.append({
-                    'name': name,
-                    'quantity': quantity,
-                    'unit': unit
-                })
-                seen.add(key)
-
+    # Применяем паттерн 2
+    for match in re.finditer(pattern2, text, re.IGNORECASE):
+        try:
+            name = match.group(1).strip().lower()
+            quantity_str = match.group(2).replace(',', '.')
+            quantity = float(quantity_str)
+            full_match = match.group(0)
+            add_ingredient(name, quantity, full_match)
         except (ValueError, IndexError):
             continue
 
