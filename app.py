@@ -99,23 +99,27 @@ def get_video_id(url: str) -> Optional[str]:
         return None
 
 def clean_description(text: str) -> str:
-    """Очищает описание от ссылок, рекламы и мусора"""
+    """Очищает описание от ссылок, хэштегов и мусора, оставляя рецепт и процесс"""
 
-    # Удаляем ссылки
+    # Удаляем ссылки и текст вокруг них (http, www, телеграмм и т.д.)
     text = re.sub(r'https?://[^\s]+', '', text)
     text = re.sub(r'www\.[^\s]+', '', text)
 
-    # Удаляем текст с рекламой/мусором
-    spam_patterns = [
-        r'(?:подпиш|subscribe|follow).*?(?:\n|$)',
-        r'(?:telegram|tg|канал|channel).*?(?:\n|$)',
-        r'(?:монобанк|карта|реквизиты|доставка).*?(?:\n|$)',
-        r'(?:промокод|скидка|promo).*?(?:\n|$)',
-        r'(?:как это было сделано|расшифровка|subtitles).*?(?:\n|$)',
-    ]
+    # Удаляем строки с ссылками на телеграмм, монобанк, промокоды
+    lines = text.split('\n')
+    filtered_lines = []
+    for line in lines:
+        # Пропускаем строки с реквизитами, ссылками, промокодами
+        if any(keyword in line.lower() for keyword in ['telegram', 'tg.me', 'монобанк', 'промокод', 'скидка', 'подпишись', 'subscribe']):
+            continue
+        filtered_lines.append(line)
+    text = '\n'.join(filtered_lines)
 
-    for pattern in spam_patterns:
-        text = re.sub(pattern, '', text, flags=re.IGNORECASE)
+    # Удаляем хэштеги целиком
+    text = re.sub(r'#[а-яa-z_]+', '', text, flags=re.IGNORECASE)
+
+    # Удаляем только строки типа "расшифровка видео", "как это было сделано видео"
+    text = re.sub(r'(?:расшифровка|transcription|как это было сделано).{0,50}(?:\n|$)', '', text, flags=re.IGNORECASE)
 
     # Удаляем множественные пробелы и пустые строки
     text = re.sub(r'\n+', '\n', text)
@@ -175,11 +179,12 @@ def get_page_text(url: str) -> Optional[str]:
         return None
 
 def find_ingredients(text: str) -> List[Dict]:
-    """Находит ингредиенты в тексте"""
+    """Находит ингредиенты в тексте (для YouTube описаний)"""
     if not text:
         return []
 
-    text = text.replace('\n', ' ').replace('\r', ' ')
+    # Разбираем по строкам для лучшего парсинга
+    lines = text.split('\n')
     ingredients = []
     seen = set()
 
@@ -195,27 +200,16 @@ def find_ingredients(text: str) -> List[Dict]:
         'ч.л': 'ч.л', 'ч л': 'ч.л', 'tsp': 'ч.л', 'чайн': 'ч.л',
     }
 
-    units_pattern = r'(?:мл|ml|г|g|мг|mg|кг|kg|шт|pcs|л|l|ст\.л|ст л|tbsp|ч\.л|ч л|tsp|миллилитр|грамм|килограмм|штук|литр|ложк)'
-
-    pattern1 = rf'(\d+(?:[.,]\d+)?)\s*({units_pattern})\s+([а-яa-z\s]+?)(?=[,;.!?\n—]|$)'
-    pattern2 = rf'([а-яa-z\s]+?)\s*—\s*(\d+(?:[.,]\d+)?)\s*({units_pattern})'
-
-    def add_ingredient(name: str, quantity: float, full_match: str):
+    def add_ingredient(name: str, quantity: float, unit: str):
         skip = False
         for excl in exclude_words:
-            if excl in name:
+            if excl in name.lower():
                 skip = True
                 break
         if skip:
             return
 
-        unit = 'шт'
-        for unit_key, unit_val in units_map.items():
-            if unit_key.lower() in full_match.lower():
-                unit = unit_val
-                break
-
-        name = re.sub(r'[,;.!?—]', '', name).strip()
+        name = re.sub(r'[,;.!?—()\[\]]', '', name).strip()
         if len(name) < 2 or len(name) > 50:
             return
         if not any(c.isalpha() for c in name):
@@ -223,28 +217,65 @@ def find_ingredients(text: str) -> List[Dict]:
 
         key = f"{name}_{unit}"
         if key not in seen and quantity > 0 and quantity < 10000:
-            ingredients.append({'name': name, 'quantity': quantity, 'unit': unit})
+            ingredients.append({'name': name.lower(), 'quantity': quantity, 'unit': unit})
             seen.add(key)
 
-    for match in re.finditer(pattern1, text, re.IGNORECASE):
-        try:
-            quantity_str = match.group(1).replace(',', '.')
-            quantity = float(quantity_str)
-            name = match.group(3).strip().lower()
-            full_match = match.group(0)
-            add_ingredient(name, quantity, full_match)
-        except:
+    # Парсим каждую строку отдельно
+    for line in lines:
+        line = line.strip()
+        if not line or len(line) < 3:
             continue
 
-    for match in re.finditer(pattern2, text, re.IGNORECASE):
-        try:
-            name = match.group(1).strip().lower()
-            quantity_str = match.group(2).replace(',', '.')
-            quantity = float(quantity_str)
-            full_match = match.group(0)
-            add_ingredient(name, quantity, full_match)
-        except:
+        # Пропускаем заголовки секций но продолжаем парсить
+        if any(keyword in line.lower() for keyword in ['начинка', 'для теста', 'для сиропа', 'ингредиент', 'рецепт']):
             continue
+
+        # Паттерн 1: "Название.....кол-во единица" (много точек в описании)
+        # Примеры: "Мука пшеничная...............1 кг" или "Масло растительное.......40 мл"
+        match = re.search(r'([а-яa-z\s\(\)]+?)\.{2,}\s*(\d+(?:[.,]\d+)?)\s*(?:кг|г|мл|л|шт|ст\.л|ч\.л|ст л|ч л)', line, re.IGNORECASE)
+        if match:
+            name = match.group(1).strip()
+            quantity_str = match.group(2).replace(',', '.')
+            try:
+                quantity = float(quantity_str)
+                # Определяем единицу из строки
+                unit = 'шт'
+                for unit_key, unit_val in units_map.items():
+                    if unit_key.lower() in line.lower():
+                        unit = unit_val
+                        break
+                add_ingredient(name, quantity, unit)
+                continue
+            except:
+                pass
+
+        # Паттерн 2: "Название — количество единица"
+        match = re.search(rf'([а-яa-z\s]+?)\s*—\s*(\d+(?:[.,]\d+)?)\s*({"|".join(units_map.keys())})', line, re.IGNORECASE)
+        if match:
+            name = match.group(1).strip()
+            quantity_str = match.group(2).replace(',', '.')
+            unit = match.group(3).lower()
+            try:
+                quantity = float(quantity_str)
+                unit = units_map.get(unit, 'шт')
+                add_ingredient(name, quantity, unit)
+                continue
+            except:
+                pass
+
+        # Паттерн 3: "кол-во единица название"
+        match = re.search(rf'(\d+(?:[.,]\d+)?)\s*({"|".join(units_map.keys())})\s+([а-яa-z\s\(\)]+?)(?:[,;]|$)', line, re.IGNORECASE)
+        if match:
+            quantity_str = match.group(1).replace(',', '.')
+            unit = match.group(2).lower()
+            name = match.group(3).strip()
+            try:
+                quantity = float(quantity_str)
+                unit = units_map.get(unit, 'шт')
+                add_ingredient(name, quantity, unit)
+                continue
+            except:
+                pass
 
     return ingredients
 
@@ -415,5 +446,4 @@ with tab3:
                 st.rerun()
     else:
         st.info("📌 Цены не загружены. Загрузите прайс-лист выше")
-
 
