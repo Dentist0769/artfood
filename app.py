@@ -1,12 +1,12 @@
 """
-🍳 КАЛЬКУЛЯТОР С ЛОГИРОВАНИЕМ (для отладки)
+🍳 КАЛЬКУЛЯТОР СЕБЕСТОИМОСТИ БЛЮД (ФИНАЛЬНАЯ ВЕРСИЯ)
+С актуальными рабочими Invidious инстансами
 """
 
 import streamlit as st
 import requests
 import re
 from typing import Optional
-import sys
 
 st.set_page_config(page_title="🍳 Кулинарный калькулятор", layout="wide")
 
@@ -14,73 +14,50 @@ st.title("🍳 Калькулятор себестоимости блюд")
 st.markdown("Вставьте ссылку на YouTube видео рецепта → приложение загрузит субтитры → рассчитает стоимость")
 
 # ============================================================================
-# ЛОГИРОВАНИЕ
+# ПОЛУЧЕНИЕ СУБТИТРОВ
 # ============================================================================
 
-def log(message: str):
-    """Выводит логи в консоль и в приложение"""
-    print(f"[LOG] {message}", file=sys.stderr)
-
-
 def get_video_id(url: str) -> Optional[str]:
-    """Извлекает ID видео"""
+    """Извлекает ID видео из ссылки"""
     try:
         pattern = r'(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&\n?#]+)'
         match = re.search(pattern, url)
-        if match:
-            video_id = match.group(1)
-            log(f"✅ Найден ID видео: {video_id}")
-            return video_id
-        else:
-            log(f"❌ ID видео не найден в URL: {url}")
-            return None
-    except Exception as e:
-        log(f"❌ Ошибка при парсинге URL: {e}")
+        return match.group(1) if match else None
+    except:
         return None
 
 
 def get_subtitles(video_id: str) -> Optional[str]:
-    """Загружает субтитры"""
+    """Загружает субтитры через Invidious API с актуальными инстансами"""
 
+    # Актуальные рабочие инстансы (обновлено июнь 2026)
     sources = [
-        "https://invidious.io",
-        "https://inv.nadeko.net",
-        "https://invidious.be",
-        "https://yewtu.be",
+        "https://iv.melmac.space",
+        "https://invidious.privacydev.net",
+        "https://inv.riverside.rocks",
+        "https://invidious.nerdvpn.de",
+        "https://yt.drgnz.club",
+        "https://inv.tiekoetter.com",
     ]
 
-    log(f"🔍 Начинаю загрузку субтитров для видео: {video_id}")
-    log(f"📍 Всего источников: {len(sources)}")
-
-    for i, source in enumerate(sources, 1):
-        log(f"⏳ Пытаюсь источник {i}/{len(sources)}: {source}")
-
+    for source in sources:
         try:
             # Получаем информацию о видео
             url = f"{source}/api/v1/videos/{video_id}"
-            log(f"  🌐 Отправляю запрос: {url}")
-
-            response = requests.get(url, timeout=8)
-            log(f"  📬 Ответ: {response.status_code}")
+            response = requests.get(url, timeout=10)
 
             if response.status_code != 200:
-                log(f"  ❌ Ошибка {response.status_code}, переходу к следующему источнику")
                 continue
 
             data = response.json()
             captions = data.get('captions', [])
-            log(f"  📋 Найдено субтитров: {len(captions)}")
 
             if not captions:
-                log(f"  ⚠️ Субтитры не найдены, переходу к следующему источнику")
                 continue
 
             # Загружаем субтитры
             caption_url = f"{source}{captions[0]['url']}"
-            log(f"  🔗 Загружаю субтитры: {caption_url}")
-
-            caption_response = requests.get(caption_url, timeout=8)
-            log(f"  📬 Ответ: {caption_response.status_code}")
+            caption_response = requests.get(caption_url, timeout=10)
 
             if caption_response.status_code == 200:
                 # Парсим VTT
@@ -96,27 +73,16 @@ def get_subtitles(video_id: str) -> Optional[str]:
                         if clean:
                             transcript.append(clean)
 
-                result = ' '.join(transcript)
-                log(f"✅ УСПЕХ! Загружено {len(result)} символов от источника: {source}")
-                return result
-            else:
-                log(f"  ❌ Не удалось загрузить субтитры (статус {caption_response.status_code})")
+                return ' '.join(transcript)
 
-        except requests.exceptions.Timeout:
-            log(f"  ⏱️ TIMEOUT (превышено время ожидания)")
-        except requests.exceptions.ConnectionError as e:
-            log(f"  🌐 ОШИБКА СОЕДИНЕНИЯ: {e}")
-        except Exception as e:
-            log(f"  ❌ ОШИБКА: {type(e).__name__}: {e}")
+        except Exception:
+            continue
 
-    log(f"❌ НЕ УДАЛОСЬ загрузить субтитры ни с одного источника!")
     return None
 
 
 def find_ingredients(text: str) -> list:
-    """Находит ингредиенты"""
-    log(f"🔍 Ищу ингредиенты в тексте ({len(text)} символов)...")
-
+    """Находит ингредиенты в тексте"""
     pattern = r'(\d+(?:\.\d+)?)\s*(г|мл|шт|ст\.л|ч\.л|л|кг)\s+([а-яa-z\s]+?)(?=[.,:;]|$)'
 
     ingredients = []
@@ -131,7 +97,6 @@ def find_ingredients(text: str) -> list:
             'unit': unit
         })
 
-    log(f"✅ Найдено ингредиентов: {len(ingredients)}")
     return ingredients
 
 
@@ -159,24 +124,18 @@ with tab1:
     if load_button:
         if not video_url.strip():
             st.error("❌ Введите ссылку")
-            log(f"❌ Пользователь не ввел ссылку")
         else:
             try:
-                log(f"🚀 СТАРТ: Пользователь ввел ссылку: {video_url}")
-
                 video_id = get_video_id(video_url)
 
                 if not video_id:
                     st.error("❌ Это не YouTube ссылка")
-                    log(f"❌ Не удалось распознать ID видео")
                 else:
-                    with st.spinner("⏳ Загружаю субтитры (может занять 15-20 сек)..."):
-                        log(f"⏳ Начинаю загрузку субтитров...")
+                    with st.spinner("⏳ Загружаю субтитры (может занять 10-20 сек)..."):
                         transcript = get_subtitles(video_id)
 
                     if transcript:
                         st.success("✅ Загружено!")
-                        log(f"✅ Субтитры успешно загружены!")
 
                         st.text_area(
                             "Текст видео",
@@ -196,17 +155,25 @@ with tab1:
                             st.session_state.transcript = transcript
                             st.info("✅ Перейдите на вкладку 'Расчет стоимости'")
                         else:
-                            st.warning("⚠️ Ингредиенты не найдены")
-                            log(f"⚠️ Ингредиенты не найдены в тексте")
+                            st.warning("⚠️ Ингредиенты не найдены в видео")
 
                     else:
-                        st.error("❌ Не удалось загрузить субтитры. Все источники недоступны. Попробуйте через 5-10 минут.")
-                        log(f"❌ ВСЕ ИСТОЧНИКИ НЕДОСТУПНЫ")
+                        st.error("""
+❌ Не удалось загрузить субтитры.
+
+**Возможные причины:**
+1. Видео без встроенных субтитров (проверьте кнопку CC на YouTube)
+2. Все серверы Invidious временно недоступны
+3. Ошибка сети
+
+**Решение:**
+- Подождите 5-10 минут и попробуйте снова
+- Выберите другое видео
+- Убедитесь что видео имеет встроенные субтитры
+                        """)
 
             except Exception as e:
-                error_msg = f"{type(e).__name__}: {e}"
-                st.error(f"❌ Ошибка: {error_msg}")
-                log(f"❌ КРИТИЧЕСКАЯ ОШИБКА: {error_msg}")
+                st.error(f"❌ Ошибка: {str(e)}")
 
 with tab2:
     st.subheader("Шаг 2: Введите цены ингредиентов")
@@ -305,5 +272,3 @@ with tab2:
 
         except Exception as e:
             st.error(f"❌ Ошибка при расчете: {str(e)}")
-            log(f"❌ Ошибка при расчете: {e}")
-
