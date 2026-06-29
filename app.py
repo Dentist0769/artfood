@@ -1,12 +1,13 @@
 """
-🍳 КАЛЬКУЛЯТОР СЕБЕСТОИМОСТИ БЛЮД (ФИНАЛЬНАЯ ВЕРСИЯ)
-С актуальными рабочими Invidious инстансами
+🍳 КАЛЬКУЛЯТОР СЕБЕСТОИМОСТИ БЛЮД (версия с yt-dlp)
+Работает напрямую с YouTube, без зависимости от Invidious
 """
 
 import streamlit as st
-import requests
 import re
 from typing import Optional
+import os
+import json
 
 st.set_page_config(page_title="🍳 Кулинарный калькулятор", layout="wide")
 
@@ -14,7 +15,7 @@ st.title("🍳 Калькулятор себестоимости блюд")
 st.markdown("Вставьте ссылку на YouTube видео рецепта → приложение загрузит субтитры → рассчитает стоимость")
 
 # ============================================================================
-# ПОЛУЧЕНИЕ СУБТИТРОВ
+# ПОЛУЧЕНИЕ СУБТИТРОВ через yt-dlp
 # ============================================================================
 
 def get_video_id(url: str) -> Optional[str]:
@@ -27,41 +28,59 @@ def get_video_id(url: str) -> Optional[str]:
         return None
 
 
-def get_subtitles(video_id: str) -> Optional[str]:
-    """Загружает субтитры через Invidious API с актуальными инстансами"""
+def get_subtitles_ytdlp(video_url: str) -> Optional[str]:
+    """Загружает субтитры через yt-dlp"""
+    try:
+        import yt_dlp
 
-    # Актуальные рабочие инстансы (обновлено июнь 2026)
-    sources = [
-        "https://iv.melmac.space",
-        "https://invidious.privacydev.net",
-        "https://inv.riverside.rocks",
-        "https://invidious.nerdvpn.de",
-        "https://yt.drgnz.club",
-        "https://inv.tiekoetter.com",
-    ]
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'writesubtitles': True,
+            'skip_download': True,
+            'subtitlesformat': 'vtt',
+            'outtmpl': '/tmp/%(id)s',
+            'socket_timeout': 15,
+        }
 
-    for source in sources:
-        try:
-            # Получаем информацию о видео
-            url = f"{source}/api/v1/videos/{video_id}"
-            response = requests.get(url, timeout=10)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(video_url, download=False)
 
-            if response.status_code != 200:
-                continue
+            if not info.get('subtitles'):
+                return None
 
-            data = response.json()
-            captions = data.get('captions', [])
+            # Берем первый доступный язык
+            subs_dict = info['subtitles']
+            if not subs_dict:
+                return None
 
-            if not captions:
-                continue
+            # Пробуем русский, потом английский, потом первый доступный
+            subs = None
+            for lang in ['ru', 'en']:
+                if lang in subs_dict:
+                    subs = subs_dict[lang]
+                    break
 
-            # Загружаем субтитры
-            caption_url = f"{source}{captions[0]['url']}"
-            caption_response = requests.get(caption_url, timeout=10)
+            if not subs:
+                subs = list(subs_dict.values())[0]
 
-            if caption_response.status_code == 200:
-                # Парсим VTT
-                lines = caption_response.text.split('\n')
+            # Загружаем VTT файл
+            if subs and len(subs) > 0:
+                vtt_url = subs[0].get('url') or subs[0].get('data')
+
+                if vtt_url and isinstance(vtt_url, str) and vtt_url.startswith('http'):
+                    import requests
+                    response = requests.get(vtt_url, timeout=10)
+                    if response.status_code == 200:
+                        subtitle_text = response.text
+                    else:
+                        return None
+                else:
+                    # Если это встроенные данные
+                    subtitle_text = vtt_url if isinstance(vtt_url, str) else ''
+
+                # Парсим VTT в обычный текст
+                lines = subtitle_text.split('\n')
                 transcript = []
 
                 for line in lines:
@@ -75,10 +94,13 @@ def get_subtitles(video_id: str) -> Optional[str]:
 
                 return ' '.join(transcript)
 
-        except Exception:
-            continue
+        return None
 
-    return None
+    except ImportError:
+        st.error("❌ yt-dlp не установлен. Это не должно было произойти. Перезагрузите приложение.")
+        return None
+    except Exception as e:
+        return None
 
 
 def find_ingredients(text: str) -> list:
@@ -131,8 +153,8 @@ with tab1:
                 if not video_id:
                     st.error("❌ Это не YouTube ссылка")
                 else:
-                    with st.spinner("⏳ Загружаю субтитры (может занять 10-20 сек)..."):
-                        transcript = get_subtitles(video_id)
+                    with st.spinner("⏳ Загружаю субтитры (может занять 15-30 сек)..."):
+                        transcript = get_subtitles_ytdlp(video_url)
 
                     if transcript:
                         st.success("✅ Загружено!")
@@ -162,14 +184,14 @@ with tab1:
 ❌ Не удалось загрузить субтитры.
 
 **Возможные причины:**
-1. Видео без встроенных субтитров (проверьте кнопку CC на YouTube)
-2. Все серверы Invidious временно недоступны
+1. Видео без встроенных субтитров
+2. Видео приватное или удалено
 3. Ошибка сети
 
 **Решение:**
-- Подождите 5-10 минут и попробуйте снова
+- Проверьте кнопку CC на YouTube
 - Выберите другое видео
-- Убедитесь что видео имеет встроенные субтитры
+- Подождите 5 минут и попробуйте снова
                         """)
 
             except Exception as e:
@@ -272,3 +294,4 @@ with tab2:
 
         except Exception as e:
             st.error(f"❌ Ошибка при расчете: {str(e)}")
+
