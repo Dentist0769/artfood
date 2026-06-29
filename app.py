@@ -4,7 +4,7 @@ import os
 from google import generativeai as genai
 from youtube_transcript_api import YouTubeTranscriptApi
 
-st.set_page_config(page_title="Кулинарный ассистент", page_icon="👨‍🍳", layout="centered")
+st.set_page_config(page_title="Кулинар", page_icon="👨‍🍳", layout="centered")
 
 CATEGORIES = {
     'soups': '🍲 Супы',
@@ -32,12 +32,10 @@ def get_video_id(url):
 
 def get_youtube_transcript(video_id):
     try:
-        # Пытаемся забрать сначала родные русские или автоматические субтитры
         transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['ru'])
         return " ".join([item['text'] for item in transcript_list])
     except Exception:
         try:
-            # Если русских нет, забираем английские
             transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
             return " ".join([item['text'] for item in transcript_list])
         except Exception:
@@ -57,91 +55,99 @@ with st.sidebar:
     if api_key:
         st.success("API ключ подключен!")
 
-tab_calc, tab_book, tab_prices = st.tabs(["🔢 Калькулятор ссылок", "📖 Книга рецептов", "💰 Цены на продукты"])
+tab_calc, tab_book, tab_prices = st.tabs(["🔢 Умный калькулятор", "📖 Книга рецептов", "💰 Цены на продукты"])
 
 # ВКЛАДКА 1: КАЛЬКУЛЯТОР
 with tab_calc:
-    st.subheader("Автоматический расчет по ссылке")
-    url_input = st.text_input("Вставь ссылку на YouTube видео:")
+    st.subheader("Расчет по ссылке или тексту")
+    user_input = st.text_area("Вставь сюда ссылку на YouTube или текст рецепта/прайса:", height=120)
     
-    if st.button("Рассчитать себестоимость", type="primary"):
+    if st.button("Обработать", type="primary"):
         if not api_key:
             st.error("Пожалуйста, введи API ключ в боковой панели!")
-        elif not url_input:
-            st.warning("Вставь ссылку!")
+        elif not user_input.strip():
+            st.warning("Поле пустое!")
         else:
-            with st.spinner("Извлекаем оригинальный текст видео и строим техкарту..."):
-                video_id = get_video_id(url_input)
+            with st.spinner("ИИ анализирует источник..."):
+                video_id = get_video_id(user_input)
                 transcript = get_youtube_transcript(video_id) if video_id else None
                 
-                if not transcript:
-                    st.error("Ютуб заблокировал чтение субтитров для этого видео. Скопируй текст описания под видео и вставь его вместо ссылки — ИИ всё посчитает!")
+                # Формируем умный контекст для Gemini
+                if video_id:
+                    if transcript:
+                        context = f"Это оригинальный текст субтитров видео YouTube (ID: {video_id}): {transcript}"
+                    else:
+                        # Если субтитры недоступны, просим ИИ использовать поиск по конкретной ссылке/описанию видео
+                        context = f"Субтитры недоступны. Пожалуйста, найди данные кулинарного видео по этой точной ссылке: {user_input}. Вытащи ингредиенты и шаги из названия или блока описания под этим видео."
                 else:
-                    prompt = f"""
-                    Ты — эксперт-технолог. Перед тобой ОРИГИНАЛЬНЫЙ ТЕКСТ СУБТИТРОВ из видео: "{transcript}".
-                    Внимательно прочитай его. Твоя задача — строго по этому тексту составить рецепт. 
-                    Ничего не выдумывай со сторонних сайтов! Если в тексте говорят про хлеб или чиабатту, делай хлеб.
-                    
-                    Выдели:
-                    1. Название блюда.
-                    2. Категорию ('soups', 'mains', 'salads', 'desserts', 'drinks', 'sausages', 'preserved', 'other').
-                    3. Ингредиенты: переведи названия на русский язык, нижний регистр, именительный падеж. Объемы переведи строго в граммы или миллилитры.
-                    4. Шаги приготовления.
+                    context = user_input
 
-                    Ответь СТРОГО в формате JSON без markdown разметки:
-                    {{
-                      "title": "Название блюда",
-                      "category": "ключ_категории",
-                      "ingredients": [{{"name": "мука", "amount": 500, "unit": "г"}}],
-                      "steps": ["Шаг 1..."]
-                    }}
-                    """
+                prompt = f"""
+                Ты — эксперт-технолог. Перед тобой кулинарные данные: "{context}".
+                Изучи их внимательно. Твоя цель — составить точный рецепт.
+                Если это ссылка на видео, найди и используй данные ИМЕННО этого видео (чиабатта, суп и т.д.). 
+                Никакой отсебятины и левых рецептов курицы!
+
+                Выдели:
+                1. Название блюда.
+                2. Категорию ('soups', 'mains', 'salads', 'desserts', 'drinks', 'sausages', 'preserved', 'other').
+                3. Ингредиенты: названия на русском языке (нижний регистр, именительный падеж). Объемы переведи строго в граммы или миллилитры.
+                4. Пошаговое приготовление.
+
+                Ответь СТРОГО в формате JSON без markdown разметки:
+                {{
+                  "type": "recipe",
+                  "title": "Название блюда",
+                  "category": "ключ_категории",
+                  "ingredients": [{{"name": "мука", "amount": 1000, "unit": "г"}}],
+                  "steps": ["Шаг 1..."]
+                }}
+                """
+                
+                try:
+                    res_text = call_gemini(prompt, api_key)
+                    res_text = res_text.replace("```json", "").replace("```", "").strip()
+                    ai_data = json.loads(res_text)
                     
-                    try:
-                        res_text = call_gemini(prompt, api_key)
-                        res_text = res_text.replace("```json", "").replace("```", "").strip()
-                        recipe_data = json.loads(res_text)
+                    total_cost = 0.0
+                    tech_card = []
+                    for ing in ai_data.get('ingredients', []):
+                        name = ing['name'].lower().strip()
+                        amount = ing['amount']
+                        price = st.session_state.products.get(name, None)
                         
-                        total_cost = 0.0
-                        tech_card = []
-                        for ing in recipe_data.get('ingredients', []):
-                            name = ing['name'].lower().strip()
-                            amount = ing['amount']
-                            price = st.session_state.products.get(name, None)
+                        cost = (amount / 1000) * price if price is not None else 0.0
+                        if price is not None:
+                            total_cost += cost
                             
-                            cost = (amount / 1000) * price if price is not None else 0.0
-                            if price is not None:
-                                total_cost += cost
-                                
-                            tech_card.append({
-                                'name': name,
-                                'amount': amount,
-                                'unit': ing['unit'],
-                                'cost': cost,
-                                'found': price is not None
-                            })
-                        
-                        new_recipe = {
-                          'id': len(st.session_state.recipes),
-                          'title': recipe_data['title'],
-                          'category': recipe_data.get('category', 'other'),
-                          'url': url_input,
-                          'tech_card': tech_card,
-                          'cost': total_cost,
-                          'steps': recipe_data.get('steps', [])
-                        }
-                        st.session_state.recipes.insert(0, new_recipe)
-                        st.success(f"✓ Рецепт '{new_recipe['title']}' успешно добавлен!")
-                        st.metric("Итого себестоимость:", f"${total_cost:.2f}")
-                        
-                    except Exception as e:
-                        st.error(f"Ошибка анализа ИИ: {e}")
+                        tech_card.append({
+                            'name': name,
+                            'amount': amount,
+                            'unit': ing['unit'],
+                            'cost': cost,
+                            'found': price is not None
+                        })
+                    
+                    new_recipe = {
+                      'id': len(st.session_state.recipes),
+                      'title': ai_data['title'],
+                      'category': ai_data.get('category', 'other'),
+                      'tech_card': tech_card,
+                      'cost': total_cost,
+                      'steps': ai_data.get('steps', [])
+                    }
+                    st.session_state.recipes.insert(0, new_recipe)
+                    st.success(f"✓ Рецепт '{new_recipe['title']}' успешно сохранен!")
+                    st.metric("Себестоимость блюда:", f"${total_cost:.2f}")
+                    
+                except Exception as e:
+                    st.error(f"Ошибка ИИ: {e}")
 
 # ВКЛАДКА 2: КНИГА РЕЦЕПТОВ
 with tab_book:
     st.subheader("Твоя база рецептов")
     if not st.session_state.recipes:
-        st.info("Здесь будут отображаться сохраненные рецепты.")
+        st.info("Здесь будут сохраненные рецепты.")
     else:
         for cat_key, cat_label in CATEGORIES.items():
             cat_recipes = [r for r in st.session_state.recipes if r['category'] == cat_key]
@@ -150,14 +156,10 @@ with tab_book:
                     for r in cat_recipes:
                         st.markdown(f"### 🍳 {r['title']}")
                         st.markdown(f"**Себестоимость:** ${r['cost']:.2f}")
-                        if r['url']:
-                            st.markdown(f"[📺 Смотреть видео]({r['url']})")
-                        
                         st.markdown("**Технологическая карта:**")
                         for item in r['tech_card']:
                             cost_str = f"${item['cost']:.2f}" if item['found'] else "❌ нет цены"
                             st.markdown(f"• {item['name']}: {item['amount']} {item.get('unit', 'г')} — {cost_str}")
-                        
                         if r['steps']:
                             st.markdown("**Приготовление:**")
                             for idx, step in enumerate(r['steps']):
@@ -166,7 +168,7 @@ with tab_book:
 
 # ВКЛАДКА 3: ЦЕНЫ
 with tab_prices:
-    st.subheader("Управление прайс-листом")
+    st.subheader("Прайс-лист")
     col1, col2, col3 = st.columns([2, 1, 1])
     with col1:
         new_prod = st.text_input("Название продукта:")
@@ -180,6 +182,6 @@ with tab_prices:
                 st.success("Добавлено!")
 
     if st.session_state.products:
-        st.markdown("### Текущий прайс-лист ($)")
+        st.markdown("### Текущие цены ($)")
         for name, price in sorted(st.session_state.products.items()):
             st.markdown(f"🍏 **{name}** — ${price:.2f} за кг/л")
