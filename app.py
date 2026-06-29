@@ -216,29 +216,84 @@ def get_youtube_data(video_url: str) -> Dict:
 
 
 def find_ingredients(text: str) -> List[Dict]:
-    """Находит ингредиенты в тексте"""
+    """Находит ингредиенты в тексте (улучшенный парсер)"""
     if not text:
         return []
-
-    pattern = r'(\d+(?:\.\d+)?)\s*(г|мл|шт|ст\.л|ч\.л|л|кг)\s+([а-яa-z\s]+?)(?=[.,:;]|$)'
 
     ingredients = []
     seen = set()
 
-    for match in re.finditer(pattern, text, re.IGNORECASE):
-        quantity = float(match.group(1))
-        unit = match.group(2).lower()
-        name = match.group(3).strip().lower()
+    # Нормализуем текст
+    text = text.replace('\n', ' ').replace('\r', ' ')
 
-        # Избегаем дубликатов
-        key = f"{name}_{unit}"
-        if key not in seen:
-            ingredients.append({
-                'name': name,
-                'quantity': quantity,
-                'unit': unit
-            })
-            seen.add(key)
+    # Паттерны поиска (в порядке приоритета)
+    patterns = [
+        # Паттерн 1: Число + единица (сокращение) + название
+        # "400 мл молоко" или "2 шт яйца" или "100g сахара"
+        r'(\d+(?:[.,]\d+)?)\s*(?:мл|ml|г|g|мг|mg|кг|kg|шт|pcs|л|l|ст\.л|tbsp|ч\.л|tsp)\s+([а-яa-z\s]+?)(?=[,;.!?\n]|$)',
+
+        # Паттерн 2: Число + полное название единицы + название
+        # "400 миллилитров молока" или "2 штуки яиц"
+        r'(\d+(?:[.,]\d+)?)\s+(?:миллилитра|миллилитров|грамма|граммов|килограмма|килограммов|штука|штуки|литра|литров)\s+([а-яa-z\s]+?)(?=[,;.!?\n]|$)',
+
+        # Паттерн 3: Только число + название (если единица не указана)
+        # "2 яйца" или "400 молоко"
+        r'(\d+(?:[.,]\d+)?)\s+([а-яa-z]{3,}(?:\s+[а-яa-z]+)?)\b',
+    ]
+
+    # Стандартные единицы
+    units_map = {
+        'мл': 'мл', 'ml': 'мл', 'миллилитр': 'мл', 'миллилитра': 'мл', 'миллилитров': 'мл',
+        'г': 'г', 'g': 'г', 'грамм': 'г', 'грамма': 'г', 'граммов': 'г',
+        'кг': 'кг', 'kg': 'кг', 'килограмм': 'кг', 'килограмма': 'кг', 'килограммов': 'кг',
+        'л': 'л', 'l': 'л', 'литр': 'л', 'литра': 'л', 'литров': 'л',
+        'мг': 'мг', 'mg': 'мг',
+        'шт': 'шт', 'pcs': 'шт', 'штука': 'шт', 'штуки': 'шт',
+        'ст.л': 'ст.л', 'tbsp': 'ст.л', 'столовая': 'ст.л', 'столовая ложка': 'ст.л',
+        'ч.л': 'ч.л', 'tsp': 'ч.л', 'чайная': 'ч.л', 'чайная ложка': 'ч.л',
+    }
+
+    # Применяем каждый паттерн
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            try:
+                quantity_str = match.group(1).replace(',', '.')
+                quantity = float(quantity_str)
+
+                # Извлекаем имя ингредиента
+                if len(match.groups()) >= 2:
+                    name = match.group(2).strip().lower()
+                else:
+                    continue
+
+                # Определяем единицу (если есть)
+                full_match = match.group(0)
+                unit = 'шт'  # Единица по умолчанию
+
+                # Ищем единицу в match
+                for unit_key, unit_val in units_map.items():
+                    if unit_key.lower() in full_match.lower():
+                        unit = unit_val
+                        break
+
+                # Очищаем название от лишних символов
+                name = re.sub(r'[,;.!?]', '', name).strip()
+
+                if len(name) < 2 or len(name) > 50:
+                    continue
+
+                # Избегаем дубликатов
+                key = f"{name}_{unit}"
+                if key not in seen and quantity > 0:
+                    ingredients.append({
+                        'name': name,
+                        'quantity': quantity,
+                        'unit': unit
+                    })
+                    seen.add(key)
+
+            except (ValueError, IndexError):
+                continue
 
     return ingredients
 
@@ -396,80 +451,5 @@ with tab3:
         try:
             content = uploaded_file.read().decode('utf-8')
 
-            lines = content.strip().split('\n')
-            prices = {}
+            lines = con
 
-            for line in lines:
-                if '\t' in line:
-                    parts = line.split('\t')
-                elif ',' in line:
-                    parts = line.split(',')
-                else:
-                    continue
-
-                if len(parts) >= 3:
-                    ingredient = parts[0].strip()
-                    try:
-                        price = float(parts[1].strip())
-                        unit = parts[2].strip()
-                        prices[ingredient] = {'price': price, 'unit': unit}
-                    except:
-                        continue
-
-            if prices:
-                st.success(f"✅ Найдено {len(prices)} позиций")
-
-                if st.button("💾 Сохранить цены", type="primary", use_container_width=True):
-                    save_prices(prices)
-                    st.success("✅ Цены сохранены!")
-
-                df = pd.DataFrame([
-                    {'Ингредиент': k, 'Цена': v['price'], 'Единица': v['unit']}
-                    for k, v in prices.items()
-                ])
-                st.dataframe(df, use_container_width=True)
-
-            else:
-                st.error("❌ Не удалось распознать формат файла")
-
-        except Exception as e:
-            st.error(f"❌ Ошибка при загрузке: {e}")
-
-    st.divider()
-
-    st.write("**Текущие цены в системе:**")
-
-    current_prices = get_prices()
-
-    if current_prices:
-        df = pd.DataFrame([
-            {'Ингредиент': k, 'Цена': v['price'], 'Единица': v['unit']}
-            for k, v in current_prices.items()
-        ])
-        st.dataframe(df, use_container_width=True)
-
-        st.write("**Добавить/изменить цену вручную:**")
-
-        col1, col2, col3 = st.columns(3)
-
-        with col1:
-            ing_name = st.text_input("Ингредиент:", placeholder="Например: молоко")
-
-        with col2:
-            ing_price = st.number_input("Цена:", min_value=0.0, step=10.0)
-
-        with col3:
-            ing_unit = st.selectbox("Единица:", ["г", "мл", "шт", "л", "кг"])
-
-        if st.button("➕ Добавить цену", use_container_width=True):
-            if ing_name.strip():
-                save_prices({ing_name: {'price': ing_price, 'unit': ing_unit}})
-                st.success(f"✅ Цена для '{ing_name}' добавлена!")
-                st.rerun()
-
-    else:
-        st.info("📌 Цены не загружены. Загрузите прайс-лист выше")
-
-
-
-        
