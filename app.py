@@ -1,7 +1,6 @@
 """
-🍳 КУЛИНАРНЫЙ КАЛЬКУЛЯТОР
+🍳 КУЛИНАРНЫЙ КАЛЬКУЛЯТОР (ИСПРАВЛЕННАЯ ВЕРСИЯ)
 Полностью готовый код - просто скопируйте и используйте!
-БЕЗ каких-либо изменений
 """
 
 import streamlit as st
@@ -15,86 +14,72 @@ st.title("🍳 Калькулятор себестоимости блюд")
 st.markdown("Вставьте ссылку на YouTube видео рецепта → приложение загрузит субтитры → рассчитает стоимость")
 
 # ============================================================================
-# ЧАСТЬ 1: Получение субтитров YouTube (работает везде, без блокировок!)
+# ПОЛУЧЕНИЕ СУБТИТРОВ
 # ============================================================================
 
-class GetSubtitles:
-    """Получает субтитры из YouTube через Invidious"""
+def get_video_id(url: str) -> Optional[str]:
+    """Извлекает ID видео из ссылки"""
+    try:
+        pattern = r'(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&\n?#]+)'
+        match = re.search(pattern, url)
+        return match.group(1) if match else None
+    except:
+        return None
 
-    # Список источников (если один не работает, пробует другой)
-    SOURCES = [
+
+def get_subtitles(video_id: str) -> Optional[str]:
+    """Загружает субтитры через Invidious API"""
+
+    sources = [
         "https://invidious.io",
         "https://inv.nadeko.net",
         "https://invidious.be",
         "https://yewtu.be",
     ]
 
-    @staticmethod
-    def get_video_id(url: str) -> Optional[str]:
-        """Извлекает ID видео из ссылки"""
-        pattern = r'(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&\n?#]+)'
-        match = re.search(pattern, url)
-        return match.group(1) if match else None
+    for source in sources:
+        try:
+            # Получаем информацию о видео
+            url = f"{source}/api/v1/videos/{video_id}"
+            response = requests.get(url, timeout=8)
 
-    @staticmethod
-    def fetch(video_url: str) -> Optional[str]:
-        """Загружает субтитры"""
-        video_id = GetSubtitles.get_video_id(video_url)
-
-        if not video_id:
-            st.error("❌ Это не YouTube ссылка")
-            return None
-
-        for source in GetSubtitles.SOURCES:
-            try:
-                # Получаем информацию о видео
-                response = requests.get(
-                    f"{source}/api/v1/videos/{video_id}",
-                    timeout=8
-                )
-
-                if response.status_code != 200:
-                    continue
-
-                data = response.json()
-                captions = data.get('captions', [])
-
-                if not captions:
-                    st.error("❌ Субтитры не найдены. Выберите видео с субтитрами")
-                    return None
-
-                # Загружаем субтитры
-                caption_url = f"{source}{captions[0]['url']}"
-                caption_response = requests.get(caption_url, timeout=8)
-
-                if caption_response.status_code == 200:
-                    # Парсим VTT формат в текст
-                    lines = caption_response.text.split('\n')
-                    transcript = []
-
-                    for line in lines:
-                        if (line.strip() and
-                            not line.startswith('WEBVTT') and
-                            '-->' not in line and
-                            not re.match(r'^\d{2}:\d{2}', line)):
-                            clean = re.sub(r'<[^>]+>', '', line).strip()
-                            if clean:
-                                transcript.append(clean)
-
-                    return ' '.join(transcript)
-
-            except Exception:
+            if response.status_code != 200:
                 continue
 
-        return None
+            data = response.json()
+            captions = data.get('captions', [])
 
+            if not captions:
+                continue
 
-# ============================================================================
-# ЧАСТЬ 2: Парсинг ингредиентов (находит количество и название)
-# ============================================================================
+            # Загружаем субтитры
+            caption_url = f"{source}{captions[0]['url']}"
+            caption_response = requests.get(caption_url, timeout=8)
+
+            if caption_response.status_code == 200:
+                # Парсим VTT
+                lines = caption_response.text.split('\n')
+                transcript = []
+
+                for line in lines:
+                    if (line.strip() and
+                        not line.startswith('WEBVTT') and
+                        '-->' not in line and
+                        not re.match(r'^\d{2}:\d{2}', line)):
+                        clean = re.sub(r'<[^>]+>', '', line).strip()
+                        if clean:
+                            transcript.append(clean)
+
+                return ' '.join(transcript)
+
+        except Exception as e:
+            continue
+
+    return None
+
 
 def find_ingredients(text: str) -> list:
-    """Находит ингредиенты в тексте (число + единица + название)"""
+    """Находит ингредиенты"""
     pattern = r'(\d+(?:\.\d+)?)\s*(г|мл|шт|ст\.л|ч\.л|л|кг)\s+([а-яa-z\s]+?)(?=[.,:;]|$)'
 
     ingredients = []
@@ -113,65 +98,77 @@ def find_ingredients(text: str) -> list:
 
 
 # ============================================================================
-# ЧАСТЬ 3: Интерфейс приложения
+# ИНТЕРФЕЙС
 # ============================================================================
 
-# Вкладка 1: Загрузка видео
 tab1, tab2 = st.tabs(["📺 Загрузка видео", "💰 Расчет стоимости"])
 
 with tab1:
     st.subheader("Шаг 1: Вставьте ссылку на видео")
 
-    video_url = st.text_input(
-        "YouTube ссылка",
-        placeholder="https://youtube.com/watch?v=...",
-        label_visibility="collapsed"
-    )
+    col1, col2 = st.columns([4, 1])
 
-    if st.button("🔄 Загрузить субтитры", type="primary", use_container_width=True):
-        if not video_url:
+    with col1:
+        video_url = st.text_input(
+            "YouTube ссылка",
+            placeholder="https://youtube.com/watch?v=...",
+            label_visibility="collapsed"
+        )
+
+    with col2:
+        load_button = st.button("🔄 Загрузить", type="primary", use_container_width=True)
+
+    if load_button:
+        if not video_url.strip():
             st.error("❌ Введите ссылку")
         else:
-            with st.spinner("⏳ Загружаю субтитры..."):
-                transcript = GetSubtitles.fetch(video_url)
+            try:
+                video_id = get_video_id(video_url)
 
-            if transcript:
-                st.success("✅ Загружено!")
-
-                # Показываем текст
-                st.text_area(
-                    "Текст видео",
-                    value=transcript,
-                    height=200,
-                    disabled=True
-                )
-
-                # Показываем найденные ингредиенты
-                st.subheader("🥘 Найденные ингредиенты:")
-                ingredients = find_ingredients(transcript)
-
-                if ingredients:
-                    for ing in ingredients:
-                        st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']}")
-
-                    # Сохраняем в памяти приложения
-                    st.session_state.ingredients = ingredients
-                    st.session_state.transcript = transcript
-                    st.info("✅ Перейдите на вкладку 'Расчет стоимости' и введите цены")
+                if not video_id:
+                    st.error("❌ Это не YouTube ссылка")
                 else:
-                    st.warning("⚠️ Ингредиенты не найдены. Возможно, в видео не упоминаются количества (число + единица измерения)")
+                    with st.spinner("⏳ Загружаю субтитры (может занять 10-15 сек)..."):
+                        transcript = get_subtitles(video_id)
+
+                    if transcript:
+                        st.success("✅ Загружено!")
+
+                        st.text_area(
+                            "Текст видео",
+                            value=transcript,
+                            height=200,
+                            disabled=True
+                        )
+
+                        st.subheader("🥘 Найденные ингредиенты:")
+                        ingredients = find_ingredients(transcript)
+
+                        if ingredients:
+                            for ing in ingredients:
+                                st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']}")
+
+                            st.session_state.ingredients = ingredients
+                            st.session_state.transcript = transcript
+                            st.info("✅ Перейдите на вкладку 'Расчет стоимости'")
+                        else:
+                            st.warning("⚠️ Ингредиенты не найдены")
+
+                    else:
+                        st.error("❌ Не удалось загрузить субтитры. Возможно видео без субтитров или Invidious недоступен. Попробуйте через 1-2 минуты.")
+
+            except Exception as e:
+                st.error(f"❌ Ошибка: {str(e)}")
 
 with tab2:
     st.subheader("Шаг 2: Введите цены ингредиентов")
 
-    if 'ingredients' not in st.session_state:
+    if 'ingredients' not in st.session_state or not st.session_state.ingredients:
         st.info("📌 Сначала загрузите видео на вкладке слева")
     else:
         ingredients = st.session_state.ingredients
 
-        if not ingredients:
-            st.warning("Нет ингредиентов для расчета")
-        else:
+        try:
             # Форма для ввода цен
             col1, col2, col3 = st.columns(3)
 
@@ -194,7 +191,7 @@ with tab2:
                     )
                     prices[ing['name']] = price
 
-            # Кнопка расчета
+            # Расчет
             if st.button("🧮 Рассчитать стоимость", type="primary", use_container_width=True):
                 st.subheader("📊 Результат")
 
@@ -204,7 +201,7 @@ with tab2:
                 for ing in ingredients:
                     price_per_unit = prices[ing['name']]
 
-                    # Конвертируем в граммы для справедливого расчета
+                    # Конвертируем в граммы
                     if ing['unit'] == 'кг':
                         weight = ing['quantity'] * 1000
                     elif ing['unit'] == 'л':
@@ -240,13 +237,12 @@ with tab2:
                     st.metric("💵 Общая стоимость", f"{total_cost:.2f} ₽")
 
                 with col2:
-                    st.metric("📊 Количество ингредиентов", len(ingredients))
+                    st.metric("📊 Ингредиентов", len(ingredients))
 
                 with col3:
-                    if total_cost > 0:
-                        st.metric("💹 Стоимость блюда", f"≈ {total_cost:.0f} ₽")
+                    st.metric("💹 За блюдо", f"{total_cost:.0f} ₽")
 
-                # Скачивание результата
+                # Скачивание
                 report = f"""
 ОТЧЕТ: Себестоимость блюда
 =====================================
@@ -265,3 +261,8 @@ with tab2:
                     mime="text/plain",
                     use_container_width=True
                 )
+
+        except Exception as e:
+            st.error(f"❌ Ошибка при расчете: {str(e)}")
+
+       
