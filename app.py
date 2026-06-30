@@ -230,7 +230,20 @@ def get_page_text(url: str) -> Optional[str]:
             'Upgrade-Insecure-Requests': '1'
         }
         response = requests.get(url, headers=headers, timeout=10)
-        response.encoding = 'utf-8'
+
+        # 🔧 ИСПРАВЛЕНО: Лучшая обработка кодировки
+        if response.encoding is None or response.encoding.lower() == 'none':
+            response.encoding = 'utf-8'
+        else:
+            # Пытаемся часто встречаемые кодировки
+            for enc in ['utf-8', 'windows-1251', 'iso-8859-5', 'cp1251']:
+                try:
+                    response.content.decode(enc)
+                    response.encoding = enc
+                    break
+                except:
+                    continue
+
         if response.status_code != 200:
             return None
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -288,7 +301,7 @@ def get_page_text(url: str) -> Optional[str]:
             for element in soup.find_all(tag):
                 element.decompose()
 
-        # 🔧 ИСПРАВЛЕНО БАГ #15: Вернул оригинальные селекторы CSS для правильного парсинга
+        # 🔧 Вернул оригинальные селекторы CSS для правильного парсинга
         for selector in ['.header', '.footer', '.menu', '.sidebar', '.nav', '.breadcrumbs', '.comments', '.banner', '.sharing']:
             for element in soup.select(selector):
                 element.decompose()
@@ -715,6 +728,3 @@ with tab3:
                 st.error("❌ Введи название ингредиента")
     else:
         st.info("📌 База цен пуста.")
-
-            
-
