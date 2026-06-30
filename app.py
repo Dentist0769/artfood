@@ -45,10 +45,13 @@ def save_recipe(name: str, category: str, ingredients: List[Dict], description: 
     conn.commit()
     conn.close()
 
-def update_recipe_name(recipe_id: int, new_name: str):
+def update_recipe_full(recipe_id: int, new_name: str, new_ingredients: List[Dict], new_description: str):
     conn = sqlite3.connect('recipes.db')
     c = conn.cursor()
-    c.execute('UPDATE recipes SET name = ? WHERE id = ?', (new_name, recipe_id))
+    ingredients_json = json.dumps(new_ingredients)
+    c.execute('''UPDATE recipes 
+                 SET name = ?, ingredients = ?, description = ? 
+                 WHERE id = ?''', (new_name, ingredients_json, new_description, recipe_id))
     conn.commit()
     conn.close()
 
@@ -321,7 +324,6 @@ def calculate_ingredient_cost(name: str, qty: float, unit: str, prices: dict) ->
             
     p_data = prices.get(name_clean)
     
-    # Умный точечный поиск по совпадению слов (если порядок перевернут)
     if not p_data:
         name_words = set(re.findall(r'[а-яa-z0-9]+', name_clean))
         for k, v in prices.items():
@@ -331,7 +333,6 @@ def calculate_ingredient_cost(name: str, qty: float, unit: str, prices: dict) ->
                 name_clean = k
                 break
                 
-    # Фаллбэк-поиск по ключевому корню слова (пропускаем стоп-слова описания)
     if not p_data:
         name_words = set(re.findall(r'[а-яa-z0-9]+', name_clean))
         stop_words = {'сухие', 'свежие', 'куриное', 'желток', 'отвар', 'белый', 'красный', 'желтый', 'пшеничная'}
@@ -401,7 +402,7 @@ with tab1:
                     st.session_state.video_url = page_url
                     st.session_state.video_title = "Рецепт со страницы"
                     st.success("✅ Страница обработана!")
-                else: st.error("❌ Не удалось загрузить страницу")
+                else: st.error("❌ Не удалось加载страницу")
 
     if 'recipe_description' in st.session_state:
         st.divider()
@@ -434,42 +435,54 @@ with tab2:
     if recipes:
         for recipe in recipes:
             with st.expander(f"📄 {recipe['name']} ({recipe['category']})"):
-                
-                # Функция динамического изменения имени рецепта
-                c_name1, c_name2 = st.columns([3, 1])
-                with c_name1:
-                    new_name = st.text_input("Редактировать название рецепта:", value=recipe['name'], key=f"ren_in_{recipe['id']}")
-                with c_name2:
-                    st.write("<div style='padding-top:28px;'></div>", unsafe_allow_html=True)
-                    if st.button("✏️ Сохранить имя", key=f"ren_btn_{recipe['id']}", use_container_width=True):
-                        if new_name.strip() and new_name.strip() != recipe['name']:
-                            update_recipe_name(recipe['id'], new_name.strip())
-                            st.success("Название обновлено!")
-                            st.rerun()
-
-                st.divider()
                 if recipe['video_url']: st.write(r"**Источник:** [Открыть ссылку](%s)" % recipe['video_url'])
-                portions = st.number_input("Количество порций:", min_value=1, value=1, key=f"p_{recipe['id']}")
-                st.divider()
-                v1, v2 = st.columns([1, 2])
-                total_cost = 0.0
-                with v1:
-                    st.markdown("**Ингредиенты и стоимость:**")
-                    for ing in recipe['ingredients']:
-                        cost, warn = calculate_ingredient_cost(ing['name'], ing['quantity'], ing['unit'], system_prices)
-                        total_cost += cost
-                        if warn == "Нет цены в базе":
-                            st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']} — <span style='color:gray;'>*{warn}*</span>", unsafe_allow_html=True)
-                        elif "Несоответствие" in warn:
-                            st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']} — <span style='color:orange;'>*{warn}*</span>", unsafe_allow_html=True)
-                        else:
-                            st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']} — **${cost:.2f}** <span style='color:green; font-size:11px;'>{warn}</span>", unsafe_allow_html=True)
+                
+                edit_mode = st.checkbox("✏️ Режим редактирования рецепта", key=f"edit_mode_{recipe['id']}")
+                
+                if edit_mode:
+                    st.write("<div style='padding-top:10px;'></div>", unsafe_allow_html=True)
+                    edit_name = st.text_input("Изменить название блюда:", value=recipe['name'], key=f"edit_name_{recipe['id']}")
+                    
+                    # 📱 Мобильный вариант редактирования ингредиентов через обычное текстовое поле
+                    current_ings_text = "\n".join([f"{ing['name']} {ing['quantity']} {ing['unit']}" for ing in recipe['ingredients']])
+                    edit_ings_text = st.text_area(
+                        "Редактировать список ингредиентов (каждый продукт на новой строке, например: мука 450 г):", 
+                        value=current_ings_text, 
+                        height=200, 
+                        key=f"edit_ing_{recipe['id']}"
+                    )
+                    
+                    edit_desc = st.text_area("Изменить текст процесса приготовления:", value=recipe['description'], height=250, key=f"edit_desc_{recipe['id']}")
+                    
+                    if st.button("💾 Сохранить изменения рецепта", key=f"save_all_{recipe['id']}", type="primary", use_container_width=True):
+                        # Просто заново парсим обновленный пользователем текст!
+                        new_ings = find_ingredients(edit_ings_text)
+                        update_recipe_full(recipe['id'], edit_name.strip(), new_ings, edit_desc)
+                        st.success("✅ Все изменения успешно зафиксированы в базе!")
+                        st.rerun()
+                else:
+                    portions = st.number_input("Количество порций:", min_value=1, value=1, key=f"p_{recipe['id']}")
                     st.divider()
-                    st.metric("💰 Стоимость замеса:", f"${total_cost:.2f}")
-                    if portions > 1: st.metric("🍽️ Себестоимость 1 порции:", f"${(total_cost / portions):.2f}")
-                with v2:
-                    st.markdown("**Процесс приготовления:**")
-                    st.write(recipe['description'] if recipe['description'] else "Описание отсутствует.")
+                    v1, v2 = st.columns([1, 2])
+                    total_cost = 0.0
+                    with v1:
+                        st.markdown("**Ингредиенты и стоимость:**")
+                        for ing in recipe['ingredients']:
+                            cost, warn = calculate_ingredient_cost(ing['name'], ing['quantity'], ing['unit'], system_prices)
+                            total_cost += cost
+                            if warn == "Нет цены в базе":
+                                st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']} — <span style='color:gray;'>*{warn}*</span>", unsafe_allow_html=True)
+                            elif "Несоответствие" in warn:
+                                st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']} — <span style='color:orange;'>*{warn}*</span>", unsafe_allow_html=True)
+                            else:
+                                st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']} — **${cost:.2f}** <span style='color:green; font-size:11px;'>{warn}</span>", unsafe_allow_html=True)
+                        st.divider()
+                        st.metric("💰 Стоимость замеса:", f"${total_cost:.2f}")
+                        if portions > 1: st.metric("🍽️ Себестоимость 1 порции:", f"${(total_cost / portions):.2f}")
+                    with v2:
+                        st.markdown("**Процесс приготовления:**")
+                        st.write(recipe['description'] if recipe['description'] else "Описание отсутствует.")
+                
                 st.divider()
                 if st.button("🗑️ Удалить рецепт", key=f"del_{recipe['id']}", use_container_width=True):
                     delete_recipe(recipe['id'])
@@ -511,3 +524,4 @@ with tab3:
                 save_prices({man_name: {'price': man_price, 'unit': man_unit}})
                 st.rerun()
     else: st.info("📌 База цен пуста.")
+  
