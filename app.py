@@ -15,11 +15,13 @@ from bs4 import BeautifulSoup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Глобальные настройки и категории (вынесены наверх во избежание NameError)
+CATEGORIES = ["Супы", "Вторые блюда", "Десерты и выпечка", "Консервация", "Колбасы", "Напитки", "Разное"]
+MAX_FILE_SIZE = 5 * 1024 * 1024
+
 st.set_page_config(page_title="🍳 Кулинарный калькулятор PRO", layout="wide")
 st.title("🍳 Кулинарный калькулятор (PRO)")
-st.markdown("Управление рецептами и расчет себестоимости")
-
-MAX_FILE_SIZE = 5 * 1024 * 1024
+st.markdown("Управление рецептами, ингредиентами и расчет себестоимости")
 
 def init_db():
     conn = sqlite3.connect('recipes.db')
@@ -28,6 +30,10 @@ def init_db():
         id INTEGER PRIMARY KEY, name TEXT NOT NULL, category TEXT NOT NULL,
         ingredients TEXT NOT NULL, video_url TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, description TEXT
     )''')
+    try:
+        c.execute('''ALTER TABLE recipes ADD COLUMN description TEXT''')
+    except sqlite3.OperationalError:
+        pass
     c.execute('''CREATE TABLE IF NOT EXISTS prices (
         id INTEGER PRIMARY KEY, ingredient TEXT UNIQUE NOT NULL, price REAL NOT NULL, unit TEXT NOT NULL, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
@@ -109,7 +115,7 @@ def clean_description(text: str) -> str:
     text = re.sub(r'https?://[^\s]+', '', text)
     text = re.sub(r'www\.[^\s]+', '', text)
     text = re.sub(r'\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b', '', text)
-    ad_keywords = ['telegram', 'tg.me', 'монобанк', 'промокод', 'скидка', 'подпишись', 'subscribe', 'instagram', 'инстаграм', 'vk.com', 'донат', 'donat', 'сбербанк', 'тинькофф', 'номер карты', 'жми на колокольчик', 'поставь лайк']
+    ad_keywords = ['telegram', 'tg.me', 'монобанк', 'промокод', 'скидка', 'подпишись', 'subscribe', 'instagram', 'инстаграм', 'vk.com', 'донат', 'donat', 'сбербанк', 'тинькофф', 'номер карты', 'жми на колокомен', 'поставь лайк', 'спонсором']
     lines = text.split('\n')
     filtered = [l.strip() for l in lines if l.strip() and not any(k in l.lower() for k in ad_keywords)]
     return '\n'.join(filtered)
@@ -192,7 +198,7 @@ def find_ingredients(text: str) -> List[Dict]:
         except: continue
     return ingredients
 
-INGREDIENT_WEIGHTS = {'помидоры': 0.15, 'цуккини': 0.25, 'кабачки': 0.25, 'лук репчатый': 0.08, 'лук': 0.08, 'чеснок': 0.005, 'куриное яйцо': 0.05, 'яйцо': 0.05, 'огурец': 0.1}
+INGREDIENT_WEIGHTS = {'помидоры': 0.15, 'цуккини': 0.25, 'кабачки': 0.25, 'лук репчатый': 0.08, 'лук': 0.08, 'чеснок': 0.005, 'куриное яйцо': 0.05, 'яйцо': 0.05, 'огурец': 0.1, 'сметана': 1.0}
 
 def calculate_ingredient_cost(name: str, qty: float, unit: str, prices: dict) -> tuple:
     name_clean = name.lower().strip()
@@ -279,9 +285,8 @@ with tab2:
     if recipes:
         for recipe in recipes:
             with st.expander(f"📄 {recipe['name']} ({recipe['category']})"):
-                if recipe['video_url']: st.link_button("🔗 Открыть источник", recipe['video_url'])
+                if recipe['video_url']: st.write(r"**Источник:** [Открыть ссылку](%s)" % recipe['video_url'])
                 
-                # Счетчик порций доступен глобально для expander
                 portions = st.number_input("Количество порций:", min_value=1, value=1, key=f"p_{recipe['id']}")
                 edit_mode = st.checkbox("✏️ Режим редактирования рецепта", key=f"edit_mode_{recipe['id']}")
                 st.divider()
@@ -291,14 +296,15 @@ with tab2:
                     current_ings_text = "\n".join([f"{ing['name']} {ing['quantity']} {ing['unit']}" for ing in recipe['ingredients']])
                     edit_ings_text = st.text_area("Ингредиенты (каждый с новой строки):", value=current_ings_text, height=180, key=f"edit_ing_{recipe['id']}")
                     
-                    # ИНТЕРАКТИВНЫЙ РАСЧЕТ ПРЯМО В РЕЖИМЕ РЕДАКТИРОВАНИЯ
-                    st.markdown("📉 **Себестоимость на лету (меняется при редактировании текста):**")
+                    # 📱 ОТОБРАЖЕНИЕ СТОИМОСТИ НА ЛЕТУ ДЛЯ ТЕЛЕФОНОВ
+                    st.markdown("📉 **Себестоимость на лету (меняется при редактировании текста выше):**")
                     live_ings = find_ingredients(edit_ings_text)
                     live_total = 0.0
                     for ing in live_ings:
                         cost, warn = calculate_ingredient_cost(ing['name'], ing['quantity'], ing['unit'], system_prices)
                         live_total += cost
                         st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']} — **${cost:.2f}** {warn}" if not warn or "$" in str(cost) else f"• {ing['quantity']} {ing['unit']} {ing['name']} — *{warn}*")
+                    st.divider()
                     st.metric("💰 Итого замес:", f"${live_total:.2f}")
                     if portions > 1: st.metric("🍽️ На 1 порцию:", f"${(live_total / portions):.2f}")
                     st.divider()
