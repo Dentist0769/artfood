@@ -12,7 +12,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 
-# 🔧 БАГ #16: Логирование ошибок
+# 🔧 Логирование ошибок
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -20,47 +20,8 @@ st.set_page_config(page_title="🍳 Кулинарный калькулятор 
 st.title("🍳 Кулинарный калькулятор (PRO)")
 st.markdown("Управление рецептами, ингредиентами и расчет себестоимости")
 
-# 🔧 БАГ #8: Ограничение размера файла
+# 🔧 Ограничение размера файла
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
-
-# 🔧 SELENIUM: Инициализация драйвера один раз
-@st.cache_resource
-def get_selenium_driver():
-    """Получить Selenium WebDriver (кэшируется для производительности)"""
-    try:
-        from selenium import webdriver
-        from selenium.webdriver.chrome.options import Options
-        from webdriver_manager.chrome import ChromeDriverManager
-        from selenium.webdriver.chrome.service import Service
-        import os
-
-        chrome_options = Options()
-        chrome_options.add_argument("--headless")  # Без окна браузера
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-        chrome_options.add_argument("--start-maximized")
-        chrome_options.add_argument("--disable-software-rasterizer")
-        chrome_options.add_argument("--disable-extensions")
-        chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-
-        # Попытка установить chromedriver
-        try:
-            service = Service(ChromeDriverManager().install())
-            driver = webdriver.Chrome(service=service, options=chrome_options)
-        except Exception as e:
-            # Если chromedriver не работает, логируем и возвращаем None для fallback
-            logger.warning(f"ChromeDriver инициализация неудачна: {e}")
-            return None
-
-        driver.set_page_load_timeout(30)
-        driver.set_script_timeout(30)
-        logger.info("✓ Selenium драйвер успешно инициализирован")
-        return driver
-    except Exception as e:
-        logger.error(f"Ошибка инициализации Selenium: {e}")
-        return None
 
 def init_db():
     conn = sqlite3.connect('recipes.db')
@@ -87,7 +48,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-# 🔧 БАГ #9: Валидация данных
+# 🔧 Валидация данных
 def is_safe_string(text: str, max_len: int = 500) -> bool:
     """Проверить строку на опасный контент"""
     if not text or len(text) > max_len:
@@ -199,15 +160,35 @@ def get_requests_session():
     """Создать session requests с встроенной retry логикой"""
     session = requests.Session()
     retry_strategy = Retry(
-        total=2,
+        total=3,
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["HEAD", "GET", "OPTIONS"],
-        backoff_factor=1
+        backoff_factor=1.5
     )
     adapter = HTTPAdapter(max_retries=retry_strategy)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     return session
+
+def validate_parsed_content(text: str) -> bool:
+    """Валидация что текст содержит хотя бы минимум полезного контента"""
+    if not text or len(text) < 100:
+        return False
+
+    # Проверка наличия хотя бы одного слова (кириллица или латиница)
+    has_words = bool(re.search(r'[А-Яа-яA-Za-z]{3,}', text))
+    if not has_words:
+        return False
+
+    # Проверка что это не просто иероглифы или мусор
+    cyrillic_count = len(re.findall(r'[А-Яа-яЁё]', text))
+    latin_count = len(re.findall(r'[A-Za-z]', text))
+
+    # Если всего букв менее 20, это вероятно мусор
+    if cyrillic_count + latin_count < 20:
+        return False
+
+    return True
 
 def clean_description(text: str) -> str:
     """Очистить описание от комментариев, тегов, ссылок и рекламы (НО НЕ инструкции!)"""
@@ -223,10 +204,19 @@ def clean_description(text: str) -> str:
     text = re.sub(r'www\.[^\s]+', '', text)
     text = re.sub(r'\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b', '', text)
 
+    # Ключевые слова РЕЦЕПТА/ИНСТРУКЦИЙ (НЕ трогать эти строки!)
+    recipe_words = [
+        'шаг', 'добавить', 'смешать', 'варить', 'жарить', 'пекать', 'готовить', 'положить',
+        'залить', 'посыпать', 'украсить', 'перемешать', 'поставить', 'выпечь', 'включить',
+        'нагреть', 'кипятить', 'тушить', 'мешать', 'взбить', 'натереть', 'нарезать',
+        'слой', 'слои', 'минуты', 'часа', 'ингредиент', 'компонент', 'порция', 'порции',
+        'тесто', 'соус', 'глазурь', 'крем', 'начинка', 'начин', 'фарш', 'маринад'
+    ]
+
     lines = text.split('\n')
     filtered_lines = []
 
-    # Ключевые слова РЕКЛАМЫ (НЕ инструкций)
+    # Ключевые слова РЕКЛАМЫ (удалять эти строки)
     ad_keywords = [
         'telegram', 'tg.me', 'монобанк', 'промокод', 'скидка', 'подпишись', 'subscribe',
         'instagram', 'инстаграм', 'vk.com', 'вконтакте', 'facebook', 'patreon', 'paypal',
@@ -235,12 +225,21 @@ def clean_description(text: str) -> str:
         'предыдущее видео', 'мой канал', 'tiktok', 'тикток', 'дзен', 'dzen',
         'жми на колокольчик', 'поставь лайк', 'dear friends', 'see you on my channel',
         'turn on subtitles', 'automatically translated', 'write to me', 'happy to answer',
-        'support the channel', 'give a like', 'leave a comment', 'share the video'
+        'support the channel', 'give a like', 'leave a comment', 'share the video',
+        'спасибо за внимание', 'до свидания', 'пока', 'всем пока', 'привет всем'
     ]
 
     for line in lines:
         line_strip = line.strip()
         if not line_strip:
+            continue
+
+        # СНАЧАЛА проверяем - это инструкция (содержит recipe_words)?
+        is_recipe_line = any(keyword in line_strip.lower() for keyword in recipe_words)
+
+        if is_recipe_line:
+            # Если это инструкция - ОСТАВЛЯЕМ её (не удаляем)
+            filtered_lines.append(line_strip)
             continue
 
         # Удаляем строки с рекламой
@@ -251,17 +250,16 @@ def clean_description(text: str) -> str:
         if re.match(r'^[\d\s:,\.\-/😊😍❤️👍💯🔥😋🤩🎉]+$', line_strip):
             continue
 
-        # Удаляем имена авторов комментариев (короткие строки только с буквами/пробелами)
-        # НО НЕ удаляем инструкции (они содержат слова типа "добавить", "варить" и т.д.)
-        if len(line_strip) < 25 and ' ' in line_strip:
-            # Проверяем это имя или инструкция
-            if re.match(r'^[А-Яа-яA-Za-z\s]+$', line_strip):
-                # Это похоже на имя, но проверим что это не инструкция
-                recipe_words = ['шаг', 'добавить', 'смешать', 'варить', 'жарить', 'пекать', 'готовить', 'положить',
-                               'залить', 'посыпать', 'украсить', 'перемешать', 'поставить', 'выпечь', 'включить',
-                               'нагреть', 'кипятить', 'тушить', 'мешать', 'взбить', 'натереть', 'нарезать']
-                if not any(word in line_strip.lower() for word in recipe_words):
-                    continue  # Это имя, удаляем
+        # Удаляем очень короткие строки, которые похоже имена авторов (но не инструкции!)
+        # Это должны быть короткие строки только с буквами
+        if len(line_strip) < 25 and re.match(r'^[А-Яа-яA-Za-z\s]+$', line_strip) and ' ' in line_strip:
+            # Двойная проверка - это не инструкция?
+            if not any(word in line_strip.lower() for word in recipe_words):
+                continue
+
+        # Удаляем хештеги-только строки
+        if re.match(r'^[#@][^\s]*(\s[#@][^\s]*)*$', line_strip):
+            continue
 
         filtered_lines.append(line_strip)
 
@@ -276,55 +274,94 @@ def clean_description(text: str) -> str:
     return text.strip()
 
 def get_page_text_fallback(url: str) -> Optional[str]:
-    """Fallback парсинг без Selenium (используется если Selenium не работает)"""
+    """Fallback парсинг без Selenium (используется как основной способ на Streamlit Cloud)"""
     max_retries = 3
-    timeout = 20  # 20 сек вместо 10
+    timeout = 40  # Увеличено с 20 до 40 сек
     session = get_requests_session()
 
     for attempt in range(max_retries):
         try:
             headers = {
-                'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
                 'Accept-Charset': 'utf-8, windows-1251, iso-8859-5',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                 'Referer': 'https://www.google.com/'
             }
-            logger.info(f"Попытка #{attempt + 1} загрузить {url}")
-            response = session.get(url, headers=headers, timeout=timeout)
+            logger.info(f"Попытка #{attempt + 1}/{max_retries} загрузить {url}")
+            response = session.get(url, headers=headers, timeout=timeout, allow_redirects=True)
 
             if response.status_code != 200:
                 logger.warning(f"Статус {response.status_code}, повторяем...")
                 if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)  # Exponential backoff
+                    wait_time = 2 ** attempt  # Exponential backoff: 1, 2, 4 сек
+                    logger.info(f"Ожидание {wait_time} сек перед повтором...")
+                    time.sleep(wait_time)
                 continue
 
-            # Улучшенная обработка кодировки для BeautifulSoup
+            # ===== УЛУЧШЕННАЯ ОБРАБОТКА КОДИРОВКИ =====
+            # Определяем список кодировок для попытки (сначала указанная сервером)
+            encodings_to_try = []
+
+            if response.encoding and response.encoding.lower() not in ['none', 'utf-8']:
+                encodings_to_try.append(response.encoding)
+
+            # Основные кодировки для русских сайтов
+            encodings_to_try.extend(['utf-8', 'windows-1251', 'iso-8859-5', 'cp1251', 'cp866'])
+
+            # Удаляем дубликаты
+            encodings_to_try = list(dict.fromkeys(encodings_to_try))
+
             soup = None
-            encodings_to_try = ['utf-8', 'windows-1251', 'iso-8859-5', 'cp1251', 'cp866']
+            used_encoding = None
 
-            # Если сервер указал кодировку, пробуем её первой
-            if response.encoding and response.encoding.lower() != 'none':
-                encodings_to_try = [response.encoding] + [e for e in encodings_to_try if e != response.encoding]
-
+            # Пробуем каждую кодировку на raw bytes
             for encoding in encodings_to_try:
                 try:
-                    # Парсим явно с указанной кодировкой
+                    # Парсим raw bytes с явно указанной кодировкой
                     text_decoded = response.content.decode(encoding)
                     soup = BeautifulSoup(text_decoded, 'html.parser')
 
-                    # Проверяем что текст не иероглифы (есть хотя бы буквы или кириллица)
-                    text_sample = soup.get_text()[:500]
-                    if any(c.isalpha() or ord(c) > 127 for c in text_sample if c.strip()):
-                        logger.info(f"✓ Кодировка {encoding} выбрана")
+                    # Проверяем что текст не иероглифы/мусор
+                    # Берем небольшой sample для проверки
+                    text_sample = soup.get_text()[:1000]
+
+                    # Проверяем наличие букв
+                    cyrillic_match = re.findall(r'[А-Яа-яЁё]', text_sample)
+                    latin_match = re.findall(r'[A-Za-z]', text_sample)
+
+                    if len(cyrillic_match) + len(latin_match) > 10:
+                        # Достаточно букв, эта кодировка подходит
+                        used_encoding = encoding
+                        logger.info(f"✓ Кодировка {encoding} выбрана (букв найдено: {len(cyrillic_match)} кирилл, {len(latin_match)} латин)")
                         break
-                except Exception as e:
+                    else:
+                        logger.debug(f"Кодировка {encoding}: мало букв ({len(cyrillic_match)} + {len(latin_match)})")
+                        soup = None
+                        continue
+
+                except (UnicodeDecodeError, LookupError) as e:
                     logger.debug(f"Кодировка {encoding} не подошла: {e}")
+                    soup = None
+                    continue
+                except Exception as e:
+                    logger.debug(f"Ошибка при обработке кодировки {encoding}: {e}")
+                    soup = None
                     continue
 
             if not soup:
-                logger.warning(f"Не удалось определить кодировку, используем utf-8")
-                soup = BeautifulSoup(response.text, 'html.parser')
+                logger.warning(f"Не удалось определить кодировку среди {encodings_to_try}, используем utf-8 с fallback")
+                try:
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    used_encoding = 'utf-8 (fallback)'
+                except Exception as e:
+                    logger.error(f"Даже utf-8 fallback не сработал: {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)
+                    continue
+
+            # ===== ПАРСИНГ СОДЕРЖИМОГО =====
+            logger.info(f"Используется кодировка: {used_encoding}")
 
             # 1. СНАЧАЛА пытаемся найти schema.org Recipe JSON (самый чистый способ)
             scripts = soup.find_all('script', type='application/ld+json')
@@ -334,6 +371,7 @@ def get_page_text_fallback(url: str) -> Optional[str]:
                         continue
                     data = json.loads(script.string)
                     recipes = []
+
                     def search_recipe(obj):
                         if isinstance(obj, dict):
                             if obj.get('@type') == 'Recipe' or (isinstance(obj.get('@type'), list) and 'Recipe' in obj.get('@type')):
@@ -343,15 +381,22 @@ def get_page_text_fallback(url: str) -> Optional[str]:
                         elif isinstance(obj, list):
                             for item in obj:
                                 search_recipe(item)
+
                     search_recipe(data)
+
                     if recipes:
                         recipe = recipes[0]
                         clean_lines = []
+
+                        # Ингредиенты
                         ing_list = recipe.get('recipeIngredient', [])
                         if ing_list:
                             for ing in ing_list:
-                                clean_lines.append(ing.strip())
+                                if isinstance(ing, str):
+                                    clean_lines.append(ing.strip())
                             clean_lines.append("")
+
+                        # Инструкции
                         instructions_raw = recipe.get('recipeInstructions', [])
                         if instructions_raw:
                             raw_steps = []
@@ -363,31 +408,36 @@ def get_page_text_fallback(url: str) -> Optional[str]:
                                         raw_steps.append(step)
                             elif isinstance(instructions_raw, str):
                                 raw_steps.append(instructions_raw)
+
                             for idx, step_text in enumerate(raw_steps, 1):
                                 if step_text:
                                     step_pure = BeautifulSoup(step_text, 'html.parser').get_text().strip()
                                     clean_lines.append(f"Шаг {idx}. {step_pure}")
+
                         combined = "\n".join(clean_lines).strip()
-                        if len(combined) > 50:
+                        if validate_parsed_content(combined):
                             logger.info("✓ Рецепт найден в schema.org JSON")
-                            return clean_description(combined)
+                            result = clean_description(combined)
+                            if validate_parsed_content(result):
+                                return result
                 except Exception as e:
                     logger.debug(f"Ошибка парсинга schema.org: {e}")
                     continue
 
             # 2. Если schema.org не нашли, очищаем страницу от мусора
             # Удаление ненужных элементов
-            for tag in ['script', 'style', 'nav', 'header', 'footer', 'aside', 'form', 'noscript', 'button', 'svg']:
+            for tag in ['script', 'style', 'nav', 'header', 'footer', 'aside', 'form', 'noscript', 'button', 'svg', 'iframe']:
                 for element in soup.find_all(tag):
                     element.decompose()
 
             # Удаление элементов по классам и ID (мусор, комментарии, авторы)
-            for selector in ['.header', '.footer', '.menu', '.sidebar', '.nav', '.breadcrumbs', '.comments', '.banner', '.sharing', '.ads', '.advertisement', '.related', '.recommend', '.author-info', '.user-comments', '.review', '.rating', '#comments', '#reviews']:
+            for selector in ['.header', '.footer', '.menu', '.sidebar', '.nav', '.breadcrumbs', '.comments', '.banner', '.sharing', '.ads', '.advertisement', '.related', '.recommend', '.author-info', '.user-comments', '.review', '.rating', '#comments', '#reviews', '.sidebar-ads']:
                 for element in soup.select(selector):
                     element.decompose()
 
             # Поиск основного контента - обычно в article, main, или div с рецептом
-            main_content = soup.find('article') or soup.find('main') or soup.find('div', class_='recipe') or soup.find('div', class_='content')
+            main_content = soup.find('article') or soup.find('main') or soup.find('div', class_=re.compile(r'recipe|content|post', re.I)) or soup.body
+
             if main_content:
                 text = main_content.get_text('\n')
             else:
@@ -396,28 +446,41 @@ def get_page_text_fallback(url: str) -> Optional[str]:
             lines = [line.strip() for line in text.splitlines() if line.strip()]
             result = clean_description('\n'.join(lines))
 
+            # Ограничиваем размер результата (максимум 5000 символов)
             if len(result) > 5000:
                 result = result[:5000]
 
-            if result:
+            # Валидируем результат перед возвратом
+            if validate_parsed_content(result):
                 logger.info("✓ Рецепт загружен через fallback парсинг")
                 return result
+            else:
+                logger.warning(f"Результат парсинга не прошел валидацию (len={len(result)})")
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+                continue
 
         except (requests.exceptions.Timeout, requests.exceptions.ConnectTimeout) as e:
             logger.warning(f"Таймаут #{attempt + 1}: {e}")
             if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
+                wait_time = 2 ** attempt
+                logger.info(f"Ожидание {wait_time} сек перед повтором...")
+                time.sleep(wait_time)
             continue
         except requests.exceptions.RequestException as e:
             logger.warning(f"Ошибка сети #{attempt + 1}: {e}")
             if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
+                wait_time = 2 ** attempt
+                logger.info(f"Ожидание {wait_time} сек перед повтором...")
+                time.sleep(wait_time)
             continue
         except Exception as e:
             logger.error(f"Неожиданная ошибка: {e}")
-            return None
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+            continue
 
-    logger.error(f"Не удалось загрузить {url} после {max_retries} попыток")
+    logger.error(f"❌ Не удалось загрузить {url} после {max_retries} попыток")
     return None
 
 def get_youtube_data(video_url: str) -> Dict:
@@ -427,7 +490,7 @@ def get_youtube_data(video_url: str) -> Dict:
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
-            'socket_timeout': 20,
+            'socket_timeout': 30,
             'skip_unavailable_fragments': True,
             'no_check_certificate': True
         }
@@ -444,104 +507,14 @@ def get_youtube_data(video_url: str) -> Dict:
         return {'description': '', 'title': 'Unknown', 'error': error_msg}
 
 def get_page_text(url: str) -> Optional[str]:
-    """Получить текст со страницы используя Selenium (работает с JS-сайтами)"""
-    driver = None
+    """Главная функция парсинга (использует только fallback, Selenium удален)"""
     try:
-        driver = get_selenium_driver()
-        if not driver:
-            logger.warning("Selenium не инициализирован, используем fallback (requests)")
-            # Fallback: используем обычный requests если Selenium не работает
-            return get_page_text_fallback(url)
-
-        # Загружаем страницу с Selenium
-        driver.get(url)
-        time.sleep(4)  # Даем странице загрузиться и выполнить JS
-
-        # Парсим HTML с BeautifulSoup
-        soup = BeautifulSoup(driver.page_source, 'html.parser')
-
-        # Попытка получить schema.org Recipe
-        scripts = soup.find_all('script', type='application/ld+json')
-        for script in scripts:
-            try:
-                if not script.string:
-                    continue
-                data = json.loads(script.string)
-                recipes = []
-                def search_recipe(obj):
-                    if isinstance(obj, dict):
-                        if obj.get('@type') == 'Recipe' or (isinstance(obj.get('@type'), list) and 'Recipe' in obj.get('@type')):
-                            recipes.append(obj)
-                        for v in obj.values():
-                            search_recipe(v)
-                    elif isinstance(obj, list):
-                        for item in obj:
-                            search_recipe(item)
-                search_recipe(data)
-                if recipes:
-                    recipe = recipes[0]
-                    clean_lines = []
-                    ing_list = recipe.get('recipeIngredient', [])
-                    if ing_list:
-                        for ing in ing_list:
-                            clean_lines.append(ing.strip())
-                        clean_lines.append("")
-                    instructions_raw = recipe.get('recipeInstructions', [])
-                    if instructions_raw:
-                        raw_steps = []
-                        if isinstance(instructions_raw, list):
-                            for step in instructions_raw:
-                                if isinstance(step, dict):
-                                    raw_steps.append(step.get('text', step.get('name', '')))
-                                elif isinstance(step, str):
-                                    raw_steps.append(step)
-                        elif isinstance(instructions_raw, str):
-                            raw_steps.append(instructions_raw)
-                        for idx, step_text in enumerate(raw_steps, 1):
-                            if step_text:
-                                step_pure = BeautifulSoup(step_text, 'html.parser').get_text().strip()
-                                clean_lines.append(f"Шаг {idx}. {step_pure}")
-                    combined = "\n".join(clean_lines).strip()
-                    if len(combined) > 50:
-                        return clean_description(combined)
-            except Exception as e:
-                logger.error(f"Ошибка парсинга schema.org: {e}")
-                continue
-
-        # Удаление ненужных элементов
-        for tag in ['script', 'style', 'nav', 'header', 'footer', 'aside', 'form', 'noscript', 'button', 'svg']:
-            for element in soup.find_all(tag):
-                element.decompose()
-
-        for selector in ['.header', '.footer', '.menu', '.sidebar', '.nav', '.breadcrumbs', '.comments', '.banner', '.sharing', '.ads', '.advertisement', '.related', '.recommend']:
-            for element in soup.select(selector):
-                element.decompose()
-
-        text = soup.get_text('\n')
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        result = clean_description('\n'.join(lines))
-
-        # Ограничиваем размер результата (максимум 5000 символов)
-        if len(result) > 5000:
-            result = result[:5000]
-
-        return result if result else None
-
+        return get_page_text_fallback(url)
     except Exception as e:
-        logger.warning(f"Ошибка Selenium: {e}, используем fallback...")
-        try:
-            return get_page_text_fallback(url)
-        except Exception as fallback_error:
-            logger.error(f"Ошибка fallback парсинга: {fallback_error}")
-            return None
-    finally:
-        if driver:
-            try:
-                driver.quit()
-            except:
-                pass
+        logger.error(f"Ошибка парсинга: {e}")
+        return None
 
-# 🔧 БАГ #2: Улучшенный перевод с retry logic и кэшированием
+# 🔧 Перевод с retry logic и кэшированием
 @lru_cache(maxsize=1000)
 def translate_line(line: str) -> str:
     """Перевести одну строку с кэшированием"""
@@ -590,7 +563,7 @@ def translate_text(text: str) -> str:
     translated = [translate_line(line) for line in lines]
     return "\n".join(translated)
 
-# 🔧 БАГ #11: Улучшенный парсинг ингредиентов с поддержкой скобок
+# 🔧 Парсинг ингредиентов с поддержкой скобок
 def find_ingredients(text: str) -> List[Dict]:
     """Найти ингредиенты в тексте"""
     if not text:
@@ -682,7 +655,7 @@ def find_ingredients(text: str) -> List[Dict]:
 
     return ingredients
 
-# 🔧 БАГ #6: Улучшенные веса для конвертации шт→кг
+# 🔧 Веса для конвертации шт→кг
 INGREDIENT_WEIGHTS = {
     'помидоры': 0.15,
     'помидор': 0.15,
@@ -796,7 +769,7 @@ with tab1:
         page_url = st.text_input("Ссылка на страницу:", placeholder="https://food.ru/recipes/...")
         if st.button("🔄 Загрузить", type="primary", use_container_width=True):
             if page_url.strip():
-                with st.spinner("⏳ Анализ страницы (может занять 3-5 секунд)..."):
+                with st.spinner("⏳ Анализ страницы (может занять 5-10 секунд)..."):
                     page_text = get_page_text(page_url)
                 if page_text:
                     trans_page = translate_text(page_text)
@@ -946,3 +919,4 @@ with tab3:
                 st.error("❌ Введи название ингредиента")
     else:
         st.info("📌 База цен пуста.")
+
