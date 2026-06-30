@@ -97,7 +97,7 @@ def get_prices() -> Dict[str, Dict]:
     return prices
 
 def clean_description(text: str) -> str:
-    """Очистка текста от ссылок, реквизитов и блогерского спама"""
+    """Глубокая очистка текста от внешних ссылок, банковских карт и рекламы"""
     if not text:
         return ""
     text = re.sub(r'https?://[^\s]+', '', text)
@@ -117,8 +117,9 @@ def clean_description(text: str) -> str:
         'turn on subtitles', 'automatically translated', 'write to me', 'happy to answer',
         'with pleasure and love', 'filled with warmth', 'sincerely wish', 'support the channel',
         'helps and motivates', 'give a like', 'leave a comment', 'any questions', 'share the video',
-        'for your warmth', 'channel come alive', 'attention!', 'ингредиенты:', 'ingredients:'
+        'for your warmth', 'channel come alive', 'attention!'
     ]
+    
     for line in lines:
         line_strip = line.strip()
         if not line_strip:
@@ -147,7 +148,7 @@ def get_youtube_data(video_url: str) -> Dict:
         return {'description': '', 'title': 'Unknown', 'error': str(e)}
 
 def get_page_text(url: str) -> Optional[str]:
-    """Парсинг кулинарных сайтов с приоритетом на JSON-LD Recipe"""
+    """Парсинг кулинарных страниц с умным извлечением разметки Schema.org"""
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         response = requests.get(url, headers=headers, timeout=10)
@@ -173,6 +174,7 @@ def get_page_text(url: str) -> Optional[str]:
                         for item in obj:
                             search_recipe(item)
                 search_recipe(data)
+                
                 if recipes:
                     recipe = recipes[0]
                     clean_lines = []
@@ -183,18 +185,19 @@ def get_page_text(url: str) -> Optional[str]:
                         clean_lines.append("")
                     instructions_raw = recipe.get('recipeInstructions', [])
                     if instructions_raw:
-                        steps = []
+                        raw_steps = []
                         if isinstance(instructions_raw, list):
                             for step in instructions_raw:
                                 if isinstance(step, dict):
-                                    steps.append(step.get('text', step.get('name', '')))
+                                    raw_steps.append(step.get('text', step.get('name', '')))
                                 elif isinstance(step, str):
-                                    steps.append(step)
+                                    raw_steps.append(step)
                         elif isinstance(instructions_raw, str):
-                            steps.append(instructions_raw)
-                        for idx, step_text in enumerate(steps, 1):
+                            raw_steps.append(instructions_raw)
+                        for idx, step_text in enumerate(raw_steps, 1):
                             if step_text:
-                                steps.append(f"Шаг {idx}. {BeautifulSoup(step_text, 'html.parser').get_text().strip()}")
+                                step_pure = BeautifulSoup(step_text, 'html.parser').get_text().strip()
+                                clean_lines.append(f"Шаг {idx}. {step_pure}")
                     combined = "\n".join(clean_lines).strip()
                     if len(combined) > 50:
                         return clean_description(combined)
@@ -234,13 +237,12 @@ def translate_text(text: str) -> str:
     return "\n".join(translated)
 
 def find_ingredients(text: str) -> List[Dict]:
+    """Глобальный триггерный поиск ингредиентов по парам Число+Мера во всем тексте"""
     if not text:
         return []
-    lines = text.split('\n')
-    ingredients = []
-    seen = set()
-    exclude_words = {'минут', 'минуты', 'минута', 'второ', 'часо', 'час', 'градусо', 'градусов',
-                     'процесс', 'духов', 'духовк', 'разогреть', 'выпекать', 'смешать', 'взбить'}
+        
+    text_clean = re.sub(r'\(.*?\)', ' ', text)
+    
     units_map = {
         'мл': 'мл', 'ml': 'мл', 'миллилитр': 'мл', 'миллилитров': 'мл',
         'г': 'г', 'g': 'г', 'грамм': 'г', 'граммов': 'г', 'грамма': 'г',
@@ -248,49 +250,71 @@ def find_ingredients(text: str) -> List[Dict]:
         'л': 'л', 'l': 'л', 'литр': 'л', 'литров': 'л',
         'шт': 'шт', 'pcs': 'шт', 'штук': 'шт', 'штука': 'шт', 'штуки': 'шт',
         'ст.л': 'ст.л', 'ст л': 'ст.л', 'tbsp': 'ст.л', 'столовая': 'ст.л', 'ложка': 'ст.л',
-        'ч.л': 'ч.л', 'ч л': 'ч.л', 'tsp': 'ч.л', 'чайная': 'ч.л'
+        'ч.л': 'ч.л', 'ч л': 'ч.л', 'tsp': 'ч.л', 'чайная': 'ч.л',
+        'зубчик': 'шт', 'зубчика': 'шт', 'зубчиков': 'шт', 'зуб.': 'шт'
     }
 
-    def add_ing(name: str, qty: float, unit: str):
-        if any(ex in name.lower() for ex in exclude_words): return
-        name = re.sub(r'[,;.!?—()\[\]]', '', name).strip()
-        if len(name) < 2 or len(name) > 50 or not any(c.isalpha() for c in name): return
-        key = f"{name}_{unit}"
-        if key not in seen and 0 < qty < 10000:
-            ingredients.append({'name': name.lower(), 'quantity': qty, 'unit': unit})
-            seen.add(key)
-
     all_units = "|".join(sorted(units_map.keys(), key=len, reverse=True))
-    for line in lines:
-        line = line.strip()
-        if not line or len(line) < 3 or any(k in line.lower() for k in ['начинка', 'для теста', 'рецепт']): continue
-        line = re.sub(r'(\d+)\s*[-—–]\s*(\d+)', r'\2', line)
-        line = re.sub(r'\(.*?\)', '', line).strip()
+    pattern = rf'\b(\d+(?:[.,]\d+)?)\s*({all_units})\b'
+    
+    # Схлопываем дефисные диапазоны авторов (например, "2-3 ст л" перейдет в "3 ст л")
+    text_clean = re.sub(r'(\d+)\s*[-—–]\s*(\d+)', r'\2', text_clean)
+    matches = list(re.finditer(pattern, text_clean, re.IGNORECASE))
+    
+    ingredients = []
+    seen = set()
+    exclude_words = {'минут', 'минуты', 'минута', 'второ', 'часо', 'час', 'градусо', 'градусов',
+                     'процесс', 'духов', 'духовк', 'разогреть', 'выпекать', 'смешать', 'взбить', 'шаг'}
 
-        m = re.search(rf'([а-яa-z\s]+?)\.{2,}\s*(\d+(?:[.,]\d+)?)\s*({all_units})', line, re.IGNORECASE)
-        if m:
-            try:
-                add_ing(m.group(1), float(m.group(2).replace(',', '.')), units_map.get(m.group(3).lower(), 'шт'))
+    for i, match in enumerate(matches):
+        try:
+            qty = float(match.group(1).replace(',', '.'))
+            unit = units_map[match.group(2).lower()]
+            
+            start_idx = match.start()
+            end_idx = match.end()
+            
+            prev_end = matches[i-1].end() if i > 0 else 0
+            left_chunk = text_clean[prev_end:start_idx]
+            
+            # Если это знак равенства дубликата веса (например, 260 мл = 260 г), пропускаем шаг
+            if '=' in left_chunk:
                 continue
-            except: pass
-        m = re.search(rf'([а-яa-z\s]+?)\s*[-—–:]\s*(\d+(?:[.,]\d+)?)\s*({all_units})', line, re.IGNORECASE)
-        if m:
-            try:
-                add_ing(m.group(1), float(m.group(2).replace(',', '.')), units_map.get(m.group(3).lower(), 'шт'))
+                
+            next_start = matches[i+1].start() if i < len(matches) - 1 else len(text_clean)
+            right_chunk = text_clean[end_idx:next_start]
+            
+            left_name = re.sub(r'[\n,;.!?—–-•:*=…\s]+$', '', left_chunk).strip()
+            left_lines = re.split(r'[\n,;=•]', left_name)
+            left_name = left_lines[-1].strip()
+            
+            right_lines = re.split(r'[\n,;=•]', right_chunk)
+            right_name = right_lines[0].strip()
+            right_name = re.sub(r'^[-—–_:\s]+', '', right_name).strip()
+            right_name = " ".join(right_name.split()[:4])
+            
+            name = ""
+            if left_name and any(c.isalpha() for c in left_name) and len(left_name) >= 2:
+                name = left_name
+            elif right_name and any(c.isalpha() for c in right_name) and len(right_name) >= 2:
+                name = right_name
+                
+            if not name:
                 continue
-            except: pass
-        m = re.search(rf'(\d+(?:[.,]\d+)?)\s*({all_units})\s+([а-яa-z\s]+?)', line, re.IGNORECASE)
-        if m:
-            try:
-                add_ing(m.group(3), float(m.group(1).replace(',', '.')), units_map.get(m.group(2).lower(), 'шт'))
-                continue
-            except: pass
-        m = re.search(rf'([а-яa-z\s]+?)\s+(\d+(?:[.,]\d+)?)\s*({all_units})\b', line, re.IGNORECASE)
-        if m:
-            try:
-                add_ing(m.group(1), float(m.group(2).replace(',', '.')), units_map.get(m.group(3).lower(), 'шт'))
-                continue
-            except: pass
+                
+            name = re.sub(r'^(хороший пучок|пучок|долька|дольки|зубчик|зубчика|можно)\s+', '', name, flags=re.IGNORECASE)
+            name = name.strip().lower()
+            
+            if any(ex in name for ex in exclude_words): continue
+            if len(name) < 2 or len(name) > 60: continue
+            
+            key = f"{name}_{unit}"
+            if key not in seen and 0 < qty < 10000:
+                ingredients.append({'name': name, 'quantity': qty, 'unit': unit})
+                seen.add(key)
+        except:
+            continue
+            
     return ingredients
 
 def calculate_ingredient_cost(name: str, qty: float, unit: str, prices: dict) -> tuple[float, str]:
@@ -460,4 +484,3 @@ with tab3:
                 save_prices({man_name: {'price': man_price, 'unit': man_unit}})
                 st.rerun()
     else: st.info("📌 База цен пуста.")
-      
