@@ -8,6 +8,8 @@ from functools import lru_cache
 import pandas as pd
 import json
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 
 # 🔧 БАГ #16: Логирование ошибок
@@ -193,6 +195,20 @@ def get_prices() -> Dict[str, Dict]:
         prices[row[0]] = {'price': row[1], 'unit': row[2]}
     return prices
 
+def get_requests_session():
+    """Создать session requests с встроенной retry логикой"""
+    session = requests.Session()
+    retry_strategy = Retry(
+        total=2,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["HEAD", "GET", "OPTIONS"],
+        backoff_factor=1
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
 def clean_description(text: str) -> str:
     """Очистить описание от комментариев, тегов, ссылок и рекламы (НО НЕ инструкции!)"""
     if not text:
@@ -263,15 +279,19 @@ def get_page_text_fallback(url: str) -> Optional[str]:
     """Fallback парсинг без Selenium (используется если Selenium не работает)"""
     max_retries = 3
     timeout = 20  # 20 сек вместо 10
+    session = get_requests_session()
 
     for attempt in range(max_retries):
         try:
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Accept-Charset': 'utf-8, windows-1251, iso-8859-5',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Referer': 'https://www.google.com/'
             }
             logger.info(f"Попытка #{attempt + 1} загрузить {url}")
-            response = requests.get(url, headers=headers, timeout=timeout)
-            response.encoding = 'utf-8'
+            response = session.get(url, headers=headers, timeout=timeout)
 
             if response.status_code != 200:
                 logger.warning(f"Статус {response.status_code}, повторяем...")
@@ -279,7 +299,32 @@ def get_page_text_fallback(url: str) -> Optional[str]:
                     time.sleep(2 ** attempt)  # Exponential backoff
                 continue
 
-            soup = BeautifulSoup(response.text, 'html.parser')
+            # Улучшенная обработка кодировки для BeautifulSoup
+            soup = None
+            encodings_to_try = ['utf-8', 'windows-1251', 'iso-8859-5', 'cp1251', 'cp866']
+
+            # Если сервер указал кодировку, пробуем её первой
+            if response.encoding and response.encoding.lower() != 'none':
+                encodings_to_try = [response.encoding] + [e for e in encodings_to_try if e != response.encoding]
+
+            for encoding in encodings_to_try:
+                try:
+                    # Парсим явно с указанной кодировкой
+                    text_decoded = response.content.decode(encoding)
+                    soup = BeautifulSoup(text_decoded, 'html.parser')
+
+                    # Проверяем что текст не иероглифы (есть хотя бы буквы или кириллица)
+                    text_sample = soup.get_text()[:500]
+                    if any(c.isalpha() or ord(c) > 127 for c in text_sample if c.strip()):
+                        logger.info(f"✓ Кодировка {encoding} выбрана")
+                        break
+                except Exception as e:
+                    logger.debug(f"Кодировка {encoding} не подошла: {e}")
+                    continue
+
+            if not soup:
+                logger.warning(f"Не удалось определить кодировку, используем utf-8")
+                soup = BeautifulSoup(response.text, 'html.parser')
 
             # 1. СНАЧАЛА пытаемся найти schema.org Recipe JSON (самый чистый способ)
             scripts = soup.find_all('script', type='application/ld+json')
