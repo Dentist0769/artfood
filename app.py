@@ -6,7 +6,7 @@ import pandas as pd
 
 st.set_page_config(page_title="🍳 Кулинарный калькулятор PRO", layout="wide")
 st.title("🍳 Кулинарный калькулятор (PRO)")
-st.markdown("Управление рецептами, ингредиентами и расчет себестомости")
+st.markdown("Управление рецептами, ингредиентами и расчет себестоимости")
 
 def init_db():
     conn = sqlite3.connect('recipes.db')
@@ -81,7 +81,6 @@ def save_prices(prices: Dict[str, Dict]):
     conn = sqlite3.connect('recipes.db')
     c = conn.cursor()
     for ingredient, data in prices.items():
-        # Сохраняем имя ингредиента всегда в нижнем регистре для точного сопоставления
         c.execute('''INSERT OR REPLACE INTO prices (ingredient, price, unit)
                      VALUES (?, ?, ?)''', (ingredient.lower().strip(), data['price'], data['unit']))
     conn.commit()
@@ -301,7 +300,7 @@ def translate_text(text: str) -> str:
     return "\n".join(translated_lines)
 
 def find_ingredients(text: str) -> List[Dict]:
-    """Автоматически извлекает ингредиенты и объемы из переведенного текста"""
+    """Автоматически извлекает ингредиенты и объемы из текста"""
     if not text:
         return []
 
@@ -320,7 +319,8 @@ def find_ingredients(text: str) -> List[Dict]:
         'л': 'л', 'l': 'л', 'литр': 'л', 'литров': 'л', 'литра': 'л',
         'шт': 'шт', 'pcs': 'шт', 'штук': 'шт', 'штука': 'шт', 'штуки': 'шт',
         'ст.л': 'ст.л', 'ст л': 'ст.л', 'tbsp': 'ст.л', 'столовая': 'ст.л', 'столовых': 'ст.л', 'столовые': 'ст.л', 'ложка': 'ст.л', 'ложки': 'ст.л',
-        'ч.л': 'ч.л', 'ч л': 'ч.л', 'tsp': 'ч.л', 'чайная': 'ч.л', 'чайных': 'ч.л', 'чайные': 'ч.л'
+        'ч.л': 'ч.л', 'ч л': 'ч.л', 'tsp': 'ч.л', 'чайная': 'ч.л', 'чайных': 'ч.л', 'чайные': 'ч.л',
+        'зубчик': 'шт', 'зубчика': 'шт', 'зубчиков': 'шт', 'зуб.': 'шт'
     }
 
     def add_ingredient(name: str, quantity: float, unit: str):
@@ -333,6 +333,9 @@ def find_ingredients(text: str) -> List[Dict]:
             return
 
         name = re.sub(r'[,;.!?—()\[\]]', '', name).strip()
+        # Очищаем от мусорных кулинарных приставок в начале строки
+        name = re.sub(r'^(хороший пучок|пучок|долька|дольки|зубчик|зубчика)\s+', '', name, flags=re.IGNORECASE)
+        
         if len(name) < 2 or len(name) > 50:
             return
         if not any(c.isalpha() for c in name):
@@ -353,6 +356,13 @@ def find_ingredients(text: str) -> List[Dict]:
         if any(keyword in line.lower() for keyword in ['начинка', 'для теста', 'для сиропа', 'рецепт']):
             continue
 
+        # 1. Умное схлопывание числовых диапазонов (например, "2-3 ст л" станет "3 ст л")
+        line = re.sub(r'(\d+(?:[.,]\d+)?)\s*[-—–]\s*(\d+(?:[.,]\d+)?)', r'\2', line)
+
+        # 2. Полное удаление круглых скобок автора во избежание попадания мусора в имя
+        line = re.sub(r'\(.*?\)', '', line).strip()
+
+        # Паттерн 1: Название....кол-во ед
         match = re.search(rf'([а-яa-z\s\(\)]+?)\.{2,}\s*(\d+(?:[.,]\d+)?)\s*(?:{all_units_pattern})', line, re.IGNORECASE)
         if match:
             name = match.group(1).strip()
@@ -369,7 +379,8 @@ def find_ingredients(text: str) -> List[Dict]:
             except:
                 pass
 
-        match = re.search(rf'([а-яa-z\s]+?)\s*[-—–]\s*(\d+(?:[.,]\d+)?)\s*({all_units_pattern})', line, re.IGNORECASE)
+        # Паттерн 2: Название — кол-во ед (теперь включая двоеточия)
+        match = re.search(rf'([а-яa-z\s]+?)\s*[-—–:]\s*(\d+(?:[.,]\d+)?)\s*({all_units_pattern})', line, re.IGNORECASE)
         if match:
             name = match.group(1).strip()
             quantity_str = match.group(2).replace(',', '.')
@@ -382,6 +393,7 @@ def find_ingredients(text: str) -> List[Dict]:
             except:
                 pass
 
+        # Паттерн 3: кол-во ед название
         match = re.search(rf'(\d+(?:[.,]\d+)?)\s*({all_units_pattern})\s+([а-яa-z\s\(\)]+?)(?:[,;]|$)', line, re.IGNORECASE)
         if match:
             quantity_str = match.group(1).replace(',', '.')
@@ -398,15 +410,36 @@ def find_ingredients(text: str) -> List[Dict]:
     return ingredients
 
 def calculate_ingredient_cost(name: str, qty: float, unit: str, prices: dict) -> tuple[float, str]:
-    """Вычисляет стоимость ингредиента на основе разницы мер веса"""
+    """Интеллектуальный расчет стоимости с поддержкой синонимов и конверсий ШТ в КГ"""
     name_clean = name.lower().strip()
+    
+    # 1. Карта синонимов для идеального мэтчинга с базой P&P
+    SYNONYMS = {
+        'кабачки': 'цуккини',
+        'кабачок': 'цуккини',
+        'яйца': 'куриное яйцо',
+        'яйцо': 'куриное яйцо',
+        'оливковое масло': 'масло растительное',
+        'растительное масло': 'масло растительное',
+        'подсолнечное масло': 'масло подсолнечное',
+        'соевый соус': 'соус соевый',
+        'горчица в зернах': 'горчица',
+        'лимонный сок': 'лимон желтый'
+    }
+    
+    for syn_k, syn_v in SYNONYMS.items():
+        if syn_k in name_clean:
+            name_clean = syn_v
+            break
+            
     p_data = prices.get(name_clean)
     
-    # Поиск по частичному совпадению, если точного нет
+    # Поиск по вхождению, если точного совпадения нет
     if not p_data:
         for k, v in prices.items():
             if k in name_clean or name_clean in k:
                 p_data = v
+                name_clean = k
                 break
                 
     if not p_data:
@@ -418,6 +451,30 @@ def calculate_ingredient_cost(name: str, qty: float, unit: str, prices: dict) ->
     
     if u_rec == p_unit:
         return qty * p_price, ""
+        
+    # 2. КРИТИЧЕСКИЙ БЛОК: Конверсия ШТ в КГ (когда в рецепте штуки, а цена за кг)
+    if u_rec == 'шт' and p_unit in ['кг', 'kg']:
+        AVG_WEIGHTS = {
+            'помидоры': 0.12,      # 120г средний томат
+            'цуккини': 0.30,       # 300г средний кабачок
+            'лук репчатый': 0.10,   # 100г луковица
+            'красный лук': 0.10,
+            'чеснок': 0.01,        # 10г один зубчик
+            'лимон желтый': 0.12,
+            'куриное яйцо': 1.0     # Яйца в P&P идут поштучно ($0.15), так что коэффициент 1
+        }
+        
+        avg_weight = 0.10 # Дежурные 100 грамм, если продукта нет в списке средних весов
+        for w_k, w_v in AVG_WEIGHTS.items():
+            if w_k in name_clean:
+                avg_weight = w_v
+                break
+                
+        if avg_weight == 1.0: # Для яиц, продающихся поштучно
+            return qty * p_price, ""
+            
+        weight_in_kg = qty * avg_weight
+        return weight_in_kg * p_price, f" (перевод из шт в кг: ~{avg_weight*1000:.0f}г/шт)"
         
     # Если в прайсе КГ, а в рецепте граммы/ложки
     if p_unit in ['кг', 'kg']:
@@ -472,7 +529,7 @@ with tab1:
                     st.session_state.video_title = translated_title
                     
                     if not ingredients:
-                        st.warning("⚠️ Список ингредиентов автоматически не определен. Вы сможете настроить его в текстовом полен.")
+                        st.warning("⚠️ Список ингредиентов автоматически не определен. Вы сможете настроить его в текстовом поле.")
 
     else:
         page_url = st.text_input("Ссылка на страницу:", placeholder="https://example.com/recipe...")
@@ -485,7 +542,7 @@ with tab1:
 
                 if page_text and len(page_text) > 100:
                     translated_page = translate_text(page_text)
-                    st.success("✅ Страница загружена и очищена от навигационного мусора!")
+                    st.success("✅ Страница загружена и очищена!")
                     ingredients = find_ingredients(translated_page)
                     
                     st.session_state.ingredients = ingredients
@@ -493,7 +550,7 @@ with tab1:
                     st.session_state.video_url = page_url
                     st.session_state.video_title = "Рецепт со страницы"
                 else:
-                    st.error("❌ Не удалось загрузить страницу или извлечь чистый текст рецепта")
+                    st.error("❌ Не удалось загрузить страницу")
 
     if 'recipe_description' in st.session_state:
         st.divider()
@@ -541,7 +598,6 @@ with tab2:
     else:
         recipes = get_recipes(filter_category)
 
-    # Получаем актуальный прайс-лист для расчета стоимости
     system_prices = get_prices()
 
     if recipes:
@@ -552,8 +608,6 @@ with tab2:
                     st.write(f"**Источник:** [Открыть ссылку]({recipe['video_url']})")
                 
                 st.divider()
-                
-                # Добавляем выбор количества порций для динамического перерасчета стоимости
                 portions = st.number_input(
                     "Укажите количество порций для расчета себестоимости:", 
                     min_value=1, value=1, step=1, key=f"portions_{recipe['id']}"
@@ -578,7 +632,6 @@ with tab2:
                             st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']} — **${cost:.2f}** <span style='font-size:11px; color:green;'>{warning}</span>", unsafe_allow_html=True)
                     
                     st.divider()
-                    # Выводим финансовые метрики
                     st.metric(label="💰 Себестоимость всего замеса:", value=f"${total_recipe_cost:.2f}")
                     if portions > 1:
                         st.metric(label="🍽️ Себестоимость 1 порции:", value=f"${(total_recipe_cost / portions):.2f}")
