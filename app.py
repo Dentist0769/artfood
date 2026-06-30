@@ -469,7 +469,7 @@ def find_ingredients(text: str) -> List[Dict]:
         return []
     text_clean = re.sub(r'\(.*?\)', ' ', text)
     units_map = {
-        'мл': 'мл', 'ml': 'мл', 'миллилитр': 'мл', 'миллилитров': 'мл',
+        'мл': 'мл', 'ml': 'мл', 'миллилитр': 'мл', 'миллилитров': 'мл', 'миллилитра': 'мл',
         'г': 'г', 'g': 'г', 'грамм': 'г', 'граммов': 'г', 'грамма': 'г',
         'кг': 'кг', 'kg': 'кг', 'килограмм': 'кг',
         'л': 'л', 'l': 'л', 'литр': 'л', 'литров': 'л',
@@ -494,13 +494,17 @@ def find_ingredients(text: str) -> List[Dict]:
         'чаша': 'шт', 'чаши': 'шт'
     }
     all_units = "|".join(sorted(units_map.keys(), key=len, reverse=True))
-    pattern = rf'(?:^|[\s,;(])(\d+(?:[.,]\d+)?)\s*({all_units})(?:[\s,;)\.]|$)'
+    
+    # ИСПРАВЛЕНО: Безопасный некорродирующий паттерн с \b границами слова вместо пожирания пробелов
+    pattern = rf'\b(\d+(?:[.,]\d+)?)\s*({all_units})\b'
+    
     text_clean = re.sub(r'(\d+)\s*[-—–]\s*(\d+)', r'\2', text_clean)
     matches = list(re.finditer(pattern, text_clean, re.IGNORECASE))
     ingredients = []
     seen = set()
     exclude_words = {'минут', 'минуты', 'минута', 'второ', 'часо', 'час', 'градусо', 'градусов',
                      'процесс', 'духов', 'духовк', 'разогреть', 'выпекать', 'смешать', 'взбить', 'шаг'}
+                     
     for i, match in enumerate(matches):
         try:
             qty = float(match.group(1).replace(',', '.'))
@@ -513,13 +517,16 @@ def find_ingredients(text: str) -> List[Dict]:
             end_idx = match.end()
             next_start = matches[i+1].start() if i < len(matches) - 1 else len(text_clean)
             right_chunk = text_clean[end_idx:next_start]
+            
             left_name = re.sub(r'[\n,;.!?—–-•:*=…\s]+$', '', left_chunk).strip()
             left_lines = re.split(r'[\n,;=•]', left_name)
             left_name = left_lines[-1].strip()
+            
             right_lines = re.split(r'[\n,;=•]', right_chunk)
             right_name = right_lines[0].strip()
             right_name = re.sub(r'^[-—–_:\s]+', '', right_name).strip()
             right_name = " ".join(right_name.split()[:4])
+            
             name = ""
             if left_name and any(c.isalpha() for c in left_name) and len(left_name) >= 2:
                 name = left_name
@@ -540,6 +547,7 @@ def find_ingredients(text: str) -> List[Dict]:
         except Exception as e:
             logger.debug(f"Ошибка парсинга ингредиента: {e}")
             continue
+            
     if len(ingredients) < 3:
         pattern_simple = r'^(.+?)\s*[-–—:]\s*(.+?)$'
         for line in text.split('\n'):
@@ -559,20 +567,10 @@ def find_ingredients(text: str) -> List[Dict]:
     return ingredients
 
 INGREDIENT_WEIGHTS = {
-    'помидоры': 0.15,
-    'помидор': 0.15,
-    'цуккини': 0.25,
-    'кабачок': 0.25,
-    'лук репчатый': 0.08,
-    'лук': 0.08,
-    'чеснок': 0.005,
-    'куриное яйцо': 0.050,
-    'яйцо': 0.050,
-    'яблоко': 0.180,
-    'банан': 0.120,
-    'картофель': 0.150,
-    'морковь': 0.100,
-    'свекла': 0.200,
+    'помидоры': 0.15, 'помидор': 0.15, 'цуккини': 0.25, 'кабачок': 0.25,
+    'лук репчатый': 0.08, 'лук': 0.08, 'чеснок': 0.005, 'куриное яйцо': 0.050,
+    'яйцо': 0.050, 'яблоко': 0.180, 'банан': 0.120, 'картофель': 0.150,
+    'морковь': 0.100, 'свекла': 0.200,
 }
 
 def calculate_ingredient_cost(name: str, qty: float, unit: str, prices: dict) -> tuple:
@@ -785,12 +783,12 @@ with tab3:
     if current_prices:
         st.dataframe(pd.DataFrame([{'Ингредиент': k, 'Цена': v['price'], 'Единица': v['unit']} for k, v in current_prices.items()]), use_container_width=True)
         st.write("**Добавить цену вручную:**")
-        c1, c2, c3 = st.columns(3)
-        with c1:
+        col_m1, col_m2, col_m3 = st.columns(3)
+        with col_m1:
             man_name = st.text_input("Ингредиент:", placeholder="Например: мука пшеничная")
-        with c2:
+        with col_m2:
             man_price = st.number_input("Цена ($):", min_value=0.0, step=0.1)
-        with c3:
+        with col_m3:
             man_unit = st.selectbox("Единица:", ["кг", "г", "л", "мл", "шт"])
         if st.button("➕ Добавить позицию", use_container_width=True):
             if man_name.strip():
