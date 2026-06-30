@@ -261,95 +261,119 @@ def clean_description(text: str) -> str:
 
 def get_page_text_fallback(url: str) -> Optional[str]:
     """Fallback парсинг без Selenium (используется если Selenium не работает)"""
-    try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        }
-        response = requests.get(url, headers=headers, timeout=10)
-        response.encoding = 'utf-8'
+    max_retries = 3
+    timeout = 20  # 20 сек вместо 10
 
-        if response.status_code != 200:
-            return None
+    for attempt in range(max_retries):
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+            logger.info(f"Попытка #{attempt + 1} загрузить {url}")
+            response = requests.get(url, headers=headers, timeout=timeout)
+            response.encoding = 'utf-8'
 
-        soup = BeautifulSoup(response.text, 'html.parser')
-
-        # 1. СНАЧАЛА пытаемся найти schema.org Recipe JSON (самый чистый способ)
-        scripts = soup.find_all('script', type='application/ld+json')
-        for script in scripts:
-            try:
-                if not script.string:
-                    continue
-                data = json.loads(script.string)
-                recipes = []
-                def search_recipe(obj):
-                    if isinstance(obj, dict):
-                        if obj.get('@type') == 'Recipe' or (isinstance(obj.get('@type'), list) and 'Recipe' in obj.get('@type')):
-                            recipes.append(obj)
-                        for v in obj.values():
-                            search_recipe(v)
-                    elif isinstance(obj, list):
-                        for item in obj:
-                            search_recipe(item)
-                search_recipe(data)
-                if recipes:
-                    recipe = recipes[0]
-                    clean_lines = []
-                    ing_list = recipe.get('recipeIngredient', [])
-                    if ing_list:
-                        for ing in ing_list:
-                            clean_lines.append(ing.strip())
-                        clean_lines.append("")
-                    instructions_raw = recipe.get('recipeInstructions', [])
-                    if instructions_raw:
-                        raw_steps = []
-                        if isinstance(instructions_raw, list):
-                            for step in instructions_raw:
-                                if isinstance(step, dict):
-                                    raw_steps.append(step.get('text', step.get('name', '')))
-                                elif isinstance(step, str):
-                                    raw_steps.append(step)
-                        elif isinstance(instructions_raw, str):
-                            raw_steps.append(instructions_raw)
-                        for idx, step_text in enumerate(raw_steps, 1):
-                            if step_text:
-                                step_pure = BeautifulSoup(step_text, 'html.parser').get_text().strip()
-                                clean_lines.append(f"Шаг {idx}. {step_pure}")
-                    combined = "\n".join(clean_lines).strip()
-                    if len(combined) > 50:
-                        return clean_description(combined)
-            except Exception as e:
-                logger.error(f"Ошибка парсинга schema.org: {e}")
+            if response.status_code != 200:
+                logger.warning(f"Статус {response.status_code}, повторяем...")
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)  # Exponential backoff
                 continue
 
-        # 2. Если schema.org не нашли, очищаем страницу от мусора
-        # Удаление ненужных элементов
-        for tag in ['script', 'style', 'nav', 'header', 'footer', 'aside', 'form', 'noscript', 'button', 'svg']:
-            for element in soup.find_all(tag):
-                element.decompose()
+            soup = BeautifulSoup(response.text, 'html.parser')
 
-        # Удаление элементов по классам и ID (мусор, комментарии, авторы)
-        for selector in ['.header', '.footer', '.menu', '.sidebar', '.nav', '.breadcrumbs', '.comments', '.banner', '.sharing', '.ads', '.advertisement', '.related', '.recommend', '.author-info', '.user-comments', '.review', '.rating', '#comments', '#reviews']:
-            for element in soup.select(selector):
-                element.decompose()
+            # 1. СНАЧАЛА пытаемся найти schema.org Recipe JSON (самый чистый способ)
+            scripts = soup.find_all('script', type='application/ld+json')
+            for script in scripts:
+                try:
+                    if not script.string:
+                        continue
+                    data = json.loads(script.string)
+                    recipes = []
+                    def search_recipe(obj):
+                        if isinstance(obj, dict):
+                            if obj.get('@type') == 'Recipe' or (isinstance(obj.get('@type'), list) and 'Recipe' in obj.get('@type')):
+                                recipes.append(obj)
+                            for v in obj.values():
+                                search_recipe(v)
+                        elif isinstance(obj, list):
+                            for item in obj:
+                                search_recipe(item)
+                    search_recipe(data)
+                    if recipes:
+                        recipe = recipes[0]
+                        clean_lines = []
+                        ing_list = recipe.get('recipeIngredient', [])
+                        if ing_list:
+                            for ing in ing_list:
+                                clean_lines.append(ing.strip())
+                            clean_lines.append("")
+                        instructions_raw = recipe.get('recipeInstructions', [])
+                        if instructions_raw:
+                            raw_steps = []
+                            if isinstance(instructions_raw, list):
+                                for step in instructions_raw:
+                                    if isinstance(step, dict):
+                                        raw_steps.append(step.get('text', step.get('name', '')))
+                                    elif isinstance(step, str):
+                                        raw_steps.append(step)
+                            elif isinstance(instructions_raw, str):
+                                raw_steps.append(instructions_raw)
+                            for idx, step_text in enumerate(raw_steps, 1):
+                                if step_text:
+                                    step_pure = BeautifulSoup(step_text, 'html.parser').get_text().strip()
+                                    clean_lines.append(f"Шаг {idx}. {step_pure}")
+                        combined = "\n".join(clean_lines).strip()
+                        if len(combined) > 50:
+                            logger.info("✓ Рецепт найден в schema.org JSON")
+                            return clean_description(combined)
+                except Exception as e:
+                    logger.debug(f"Ошибка парсинга schema.org: {e}")
+                    continue
 
-        # Поиск основного контента - обычно в article, main, или div с рецептом
-        main_content = soup.find('article') or soup.find('main') or soup.find('div', class_='recipe') or soup.find('div', class_='content')
-        if main_content:
-            text = main_content.get_text('\n')
-        else:
-            text = soup.get_text('\n')
+            # 2. Если schema.org не нашли, очищаем страницу от мусора
+            # Удаление ненужных элементов
+            for tag in ['script', 'style', 'nav', 'header', 'footer', 'aside', 'form', 'noscript', 'button', 'svg']:
+                for element in soup.find_all(tag):
+                    element.decompose()
 
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        result = clean_description('\n'.join(lines))
+            # Удаление элементов по классам и ID (мусор, комментарии, авторы)
+            for selector in ['.header', '.footer', '.menu', '.sidebar', '.nav', '.breadcrumbs', '.comments', '.banner', '.sharing', '.ads', '.advertisement', '.related', '.recommend', '.author-info', '.user-comments', '.review', '.rating', '#comments', '#reviews']:
+                for element in soup.select(selector):
+                    element.decompose()
 
-        if len(result) > 5000:
-            result = result[:5000]
+            # Поиск основного контента - обычно в article, main, или div с рецептом
+            main_content = soup.find('article') or soup.find('main') or soup.find('div', class_='recipe') or soup.find('div', class_='content')
+            if main_content:
+                text = main_content.get_text('\n')
+            else:
+                text = soup.get_text('\n')
 
-        return result if result else None
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            result = clean_description('\n'.join(lines))
 
-    except Exception as e:
-        logger.error(f"Ошибка fallback парсинга: {e}")
-        return None
+            if len(result) > 5000:
+                result = result[:5000]
+
+            if result:
+                logger.info("✓ Рецепт загружен через fallback парсинг")
+                return result
+
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectTimeout) as e:
+            logger.warning(f"Таймаут #{attempt + 1}: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+            continue
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"Ошибка сети #{attempt + 1}: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+            continue
+        except Exception as e:
+            logger.error(f"Неожиданная ошибка: {e}")
+            return None
+
+    logger.error(f"Не удалось загрузить {url} после {max_retries} попыток")
+    return None
 
 def get_youtube_data(video_url: str) -> Dict:
     """Получить данные YouTube видео с обработкой ошибок"""
