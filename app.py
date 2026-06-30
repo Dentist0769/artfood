@@ -253,7 +253,6 @@ def get_page_text(url: str) -> Optional[str]:
             for element in soup.select(selector):
                 element.decompose()
                 
-        # Извлекаем текст построчно, чтобы не потерять структуру
         lines = [line.strip() for line in soup.get_text('\n').splitlines() if line.strip()]
         text = '\n'.join(lines)
         return clean_description(text)
@@ -359,10 +358,7 @@ def find_ingredients(text: str) -> List[Dict]:
         if any(keyword in line.lower() for keyword in ['начинка', 'для теста', 'для сиропа', 'рецепт']):
             continue
 
-        # Схлопывание числовых диапазонов (например, "2-3 ст л" -> "3 ст л")
-        line = re.sub(r'(\d+(?:[.,]\d+)?)\s*[-—–]\s*(\d+(?:[.,]\d+)?)', r'\2', line)
-
-        # Удаление круглых скобок автора
+        line = re.sub(r'(\d+(?:[.,]\d+)?)\s*[-—–]\s*(\d+(?:[.,]\d+))', r'\2', line)
         line = re.sub(r'\(.*?\)', '', line).strip()
 
         # Паттерн 1: Название....кол-во ед
@@ -382,7 +378,7 @@ def find_ingredients(text: str) -> List[Dict]:
             except:
                 pass
 
-        # Паттерн 2: Название — кол-во ед (включая двоеточия)
+        # Паттерн 2: Название — кол-во ед
         match = re.search(rf'([а-яa-z\s]+?)\s*[-—–:]\s*(\d+(?:[.,]\d+)?)\s*({all_units_pattern})', line, re.IGNORECASE)
         if match:
             name = match.group(1).strip()
@@ -410,8 +406,7 @@ def find_ingredients(text: str) -> List[Dict]:
             except:
                 pass
 
-        # КРИТИЧЕСКИЙ ПАТТЕРН 4 (для сайтов): Название кол-во ед (без знаков препинания)
-        # Пример: "Пшеничная мука хлебопекарная 450 г" или "Вода 260 мл"
+        # Паттерн 4 (для сайтов): Название кол-во ед
         match = re.search(rf'([а-яa-z\s\(\)]+?)\s+(\d+(?:[.,]\d+)?)\s*({all_units_pattern})\b', line, re.IGNORECASE)
         if match:
             name = match.group(1).strip()
@@ -478,7 +473,7 @@ def calculate_ingredient_cost(name: str, qty: float, unit: str, prices: dict) ->
             'красный лук': 0.10,
             'чеснок': 0.01,
             'лимон желтый': 0.12,
-            'куриное яйцо': 1.0     # Яйца поштучно в P&P Wholesale
+            'куриное яйцо': 1.0
         }
         
         avg_weight = 0.10
@@ -719,4 +714,15 @@ with tab3:
         st.write("**Добавить/изменить цену вручную:**")
         col1, col2, col3 = st.columns(3)
         with col1:
-            ing_name = st.text_input("Ингредиент:", placeholder="На
+            ing_name = st.text_input("Ингредиент:", placeholder="Например: молоко")
+        with col2:
+            ing_price = st.number_input("Цена:", min_value=0.0, step=10.0)
+        with col3:
+            ing_unit = st.selectbox("Единица:", ["г", "мл", "шт", "л", "кг"])
+        if st.button("➕ Добавить цену", use_container_width=True):
+            if ing_name.strip():
+                save_prices({ing_name: {'price': ing_price, 'unit': ing_unit}})
+                st.success(f"✅ Цена для '{ing_name}' добавлена!")
+                st.rerun()
+    else:
+        st.info("📌 Цены не загружены.")
