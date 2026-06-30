@@ -220,7 +220,15 @@ def get_youtube_data(video_url: str) -> Dict:
 def get_page_text(url: str) -> Optional[str]:
     """Получить текст со страницы с парсингом Schema.org"""
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'ru-RU,ru;q=0.9',
+            'Referer': 'https://www.google.com/',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
+        }
         response = requests.get(url, headers=headers, timeout=10)
         response.encoding = 'utf-8'
         if response.status_code != 200:
@@ -275,18 +283,13 @@ def get_page_text(url: str) -> Optional[str]:
                 logger.error(f"Ошибка парсинга schema.org: {e}")
                 continue
 
-        # Удаление ненужных элементов (осторожнее, чтобы не удалить полезный контент)
-        for tag in ['script', 'style', 'nav', 'footer', 'noscript']:
+        # Удаление ненужных элементов (оригинальный полный список селекторов)
+        for tag in ['script', 'style', 'nav', 'header', 'footer', 'aside', 'form', 'noscript', 'button', 'svg']:
             for element in soup.find_all(tag):
                 element.decompose()
 
-        # 🔧 БАГ #15: Более безопасные селекторы
-        safe_selectors = [
-            '.comments', '.comments-section',
-            '.banner', '.ads', '.advertisement',
-            '.sidebar-ads', '.floating-ads'
-        ]
-        for selector in safe_selectors:
+        # 🔧 ИСПРАВЛЕНО БАГ #15: Вернул оригинальные селекторы CSS для правильного парсинга
+        for selector in ['.header', '.footer', '.menu', '.sidebar', '.nav', '.breadcrumbs', '.comments', '.banner', '.sharing']:
             for element in soup.select(selector):
                 element.decompose()
 
@@ -712,4 +715,6 @@ with tab3:
                 st.error("❌ Введи название ингредиента")
     else:
         st.info("📌 База цен пуста.")
+
+            
 
