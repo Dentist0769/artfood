@@ -30,20 +30,30 @@ def get_selenium_driver():
         from selenium.webdriver.chrome.options import Options
         from webdriver_manager.chrome import ChromeDriverManager
         from selenium.webdriver.chrome.service import Service
+        import os
 
         chrome_options = Options()
         chrome_options.add_argument("--headless")  # Без окна браузера
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-        chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        chrome_options.add_argument("--start-maximized")
+        chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+        # Для Streamlit Cloud
+        if os.path.exists('/etc/chromium'):  # Streamlit Cloud indicator
+            chrome_options.add_argument("--disable-software-rasterizer")
+            chrome_options.add_argument("--disable-extensions")
 
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=chrome_options)
-        driver.set_page_load_timeout(20)
+        driver.set_page_load_timeout(30)
+        driver.set_script_timeout(30)
         return driver
     except Exception as e:
         logger.error(f"Ошибка инициализации Selenium: {e}")
+        st.warning(f"⚠️ Ошибка Selenium: {str(e)[:100]}")
         return None
 
 def init_db():
@@ -219,6 +229,42 @@ def clean_description(text: str) -> str:
     text = re.sub(r'\n{2,}', '\n', text)
     return text.strip()
 
+def get_page_text_fallback(url: str) -> Optional[str]:
+    """Fallback парсинг без Selenium (используется если Selenium не работает)"""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        response.encoding = 'utf-8'
+
+        if response.status_code != 200:
+            return None
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        # Удаление ненужных элементов
+        for tag in ['script', 'style', 'nav', 'header', 'footer', 'aside', 'form', 'noscript', 'button', 'svg']:
+            for element in soup.find_all(tag):
+                element.decompose()
+
+        for selector in ['.header', '.footer', '.menu', '.sidebar', '.nav', '.breadcrumbs', '.comments', '.banner', '.sharing', '.ads', '.advertisement', '.related', '.recommend']:
+            for element in soup.select(selector):
+                element.decompose()
+
+        text = soup.get_text('\n')
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        result = clean_description('\n'.join(lines))
+
+        if len(result) > 5000:
+            result = result[:5000]
+
+        return result if result else None
+
+    except Exception as e:
+        logger.error(f"Ошибка fallback парсинга: {e}")
+        return None
+
 def get_youtube_data(video_url: str) -> Dict:
     """Получить данные YouTube видео с обработкой ошибок"""
     try:
@@ -248,12 +294,13 @@ def get_page_text(url: str) -> Optional[str]:
     try:
         driver = get_selenium_driver()
         if not driver:
-            logger.error("Selenium не инициализирован")
-            return None
+            logger.warning("Selenium не инициализирован, используем fallback (requests)")
+            # Fallback: используем обычный requests если Selenium не работает
+            return get_page_text_fallback(url)
 
         # Загружаем страницу с Selenium
         driver.get(url)
-        time.sleep(3)  # Даем странице загрузиться и выполнить JS
+        time.sleep(4)  # Даем странице загрузиться и выполнить JS
 
         # Парсим HTML с BeautifulSoup
         soup = BeautifulSoup(driver.page_source, 'html.parser')
@@ -326,8 +373,12 @@ def get_page_text(url: str) -> Optional[str]:
         return result if result else None
 
     except Exception as e:
-        logger.error(f"Ошибка при парсинге страницы (Selenium): {e}")
-        return None
+        logger.warning(f"Ошибка Selenium: {e}, используем fallback...")
+        try:
+            return get_page_text_fallback(url)
+        except Exception as fallback_error:
+            logger.error(f"Ошибка fallback парсинга: {fallback_error}")
+            return None
     finally:
         if driver:
             try:
@@ -740,5 +791,3 @@ with tab3:
                 st.error("❌ Введи название ингредиента")
     else:
         st.info("📌 База цен пуста.")
-
-              
