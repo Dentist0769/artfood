@@ -6,7 +6,7 @@ import pandas as pd
 
 st.set_page_config(page_title="🍳 Кулинарный калькулятор PRO", layout="wide")
 st.title("🍳 Кулинарный калькулятор (PRO)")
-st.markdown("Управление рецептами, ингредиентами и расчет себестоимости")
+st.markdown("Управление рецептами, ингредиентами и расчет себестомости")
 
 def init_db():
     conn = sqlite3.connect('recipes.db')
@@ -81,8 +81,9 @@ def save_prices(prices: Dict[str, Dict]):
     conn = sqlite3.connect('recipes.db')
     c = conn.cursor()
     for ingredient, data in prices.items():
+        # Сохраняем имя ингредиента всегда в нижнем регистре для точного сопоставления
         c.execute('''INSERT OR REPLACE INTO prices (ingredient, price, unit)
-                     VALUES (?, ?, ?)''', (ingredient, data['price'], data['unit']))
+                     VALUES (?, ?, ?)''', (ingredient.lower().strip(), data['price'], data['unit']))
     conn.commit()
     conn.close()
 
@@ -110,17 +111,13 @@ def clean_description(text: str) -> str:
     if not text:
         return ""
 
-    # Удаляем ссылки
     text = re.sub(r'https?://[^\s]+', '', text)
     text = re.sub(r'www\.[^\s]+', '', text)
-    
-    # Удаляем номера карт
     text = re.sub(r'\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b', '', text)
 
     lines = text.split('\n')
     filtered_lines = []
     
-    # Расширенный список мусорных фраз (RU + EN из скриншотов)
     junk_keywords = [
         'telegram', 'tg.me', 'монобанк', 'промокод', 'скидка', 'подпишись', 'subscribe',
         'instagram', 'инстаграм', 'vk.com', 'вконтакте', 'facebook', 'patreon', 'paypal', 
@@ -193,7 +190,6 @@ def get_page_text(url: str) -> Optional[str]:
             
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # --- СТРАТЕГИЯ 1: Извлечение через JSON-LD (микроразметка Schema.org Recipe) ---
         scripts = soup.find_all('script', type='application/ld+json')
         for script in scripts:
             try:
@@ -218,15 +214,13 @@ def get_page_text(url: str) -> Optional[str]:
                     recipe = recipes[0]
                     clean_lines = []
                     
-                    # Собираем ингредиенты для распознавания парсером компонентов
                     ing_list = recipe.get('recipeIngredient', [])
                     if ing_list:
                         for ing in ing_list:
                             if isinstance(ing, str):
                                 clean_lines.append(ing.strip())
-                        clean_lines.append("") # Отступ
+                        clean_lines.append("")
                         
-                    # Собираем шаги приготовления
                     instructions_raw = recipe.get('recipeInstructions', [])
                     if instructions_raw:
                         steps = []
@@ -241,7 +235,6 @@ def get_page_text(url: str) -> Optional[str]:
                             
                         for idx, step_text in enumerate(steps, 1):
                             if step_text:
-                                # Очищаем текст шага от возможных внутренних HTML тегов
                                 step_pure = BeautifulSoup(step_text, "html.parser").get_text()
                                 clean_lines.append(f"Шаг {idx}. {step_pure.strip()}")
                                 
@@ -251,7 +244,6 @@ def get_page_text(url: str) -> Optional[str]:
             except:
                 continue
                 
-        # --- СТРАТЕГИЯ 2: Фаллбэк (Если микроразметки нет, жестко чистим структуру HTML) ---
         for trash_tag in ['script', 'style', 'nav', 'header', 'footer', 'aside', 'form', 'noscript', 'button', 'svg']:
             for element in soup.find_all(trash_tag):
                 element.decompose()
@@ -405,6 +397,48 @@ def find_ingredients(text: str) -> List[Dict]:
 
     return ingredients
 
+def calculate_ingredient_cost(name: str, qty: float, unit: str, prices: dict) -> tuple[float, str]:
+    """Вычисляет стоимость ингредиента на основе разницы мер веса"""
+    name_clean = name.lower().strip()
+    p_data = prices.get(name_clean)
+    
+    # Поиск по частичному совпадению, если точного нет
+    if not p_data:
+        for k, v in prices.items():
+            if k in name_clean or name_clean in k:
+                p_data = v
+                break
+                
+    if not p_data:
+        return 0.0, "Нет цены в базе"
+        
+    p_price = p_data['price']
+    p_unit = p_data['unit'].lower().strip()
+    u_rec = unit.lower().strip()
+    
+    if u_rec == p_unit:
+        return qty * p_price, ""
+        
+    # Если в прайсе КГ, а в рецепте граммы/ложки
+    if p_unit in ['кг', 'kg']:
+        if u_rec in ['г', 'g', 'грамм', 'граммов', 'грамма']:
+            return (qty / 1000.0) * p_price, ""
+        elif u_rec in ['ч.л', 'ч л']:
+            return (qty * 5.0 / 1000.0) * p_price, " (расчет как ~5г)"
+        elif u_rec in ['ст.л', 'ст л']:
+            return (qty * 15.0 / 1000.0) * p_price, " (расчет как ~15г)"
+            
+    # Если в прайсе Л, а в рецепте мл/ложки
+    if p_unit in ['л', 'l', 'литр']:
+        if u_rec in ['мл', 'ml', 'миллилитр']:
+            return (qty / 1000.0) * p_price, ""
+        elif u_rec in ['ч.л', 'ч л']:
+            return (qty * 5.0 / 1000.0) * p_price, " (расчет как ~5мл)"
+        elif u_rec in ['ст.л', 'ст л']:
+            return (qty * 15.0 / 1000.0) * p_price, " (расчет как ~15мл)"
+            
+    return 0.0, f"Несоответствие ед. ({u_rec} vs {p_unit})"
+
 init_db()
 CATEGORIES = ["Супы", "Вторые блюда", "Десерты и выпечка", "Консервация", "Колбасы", "Напитки", "Разное"]
 
@@ -430,7 +464,6 @@ with tab1:
                     translated_title = translate_text(data['title'])
                     
                     st.success("✅ Описание успешно переведено и очищено!")
-                    
                     ingredients = find_ingredients(translated_description)
 
                     st.session_state.ingredients = ingredients
@@ -439,7 +472,7 @@ with tab1:
                     st.session_state.video_title = translated_title
                     
                     if not ingredients:
-                        st.warning("⚠️ Список ингредиентов автоматически не определен. Вы сможете настроить его в текстовом поле.")
+                        st.warning("⚠️ Список ингредиентов автоматически не определен. Вы сможете настроить его в текстовом полен.")
 
     else:
         page_url = st.text_input("Ссылка на страницу:", placeholder="https://example.com/recipe...")
@@ -508,6 +541,9 @@ with tab2:
     else:
         recipes = get_recipes(filter_category)
 
+    # Получаем актуальный прайс-лист для расчета стоимости
+    system_prices = get_prices()
+
     if recipes:
         for recipe in recipes:
             with st.expander(f"📄 {recipe['name']} ({recipe['category']})"):
@@ -516,12 +552,36 @@ with tab2:
                     st.write(f"**Источник:** [Открыть ссылку]({recipe['video_url']})")
                 
                 st.divider()
+                
+                # Добавляем выбор количества порций для динамического перерасчета стоимости
+                portions = st.number_input(
+                    "Укажите количество порций для расчета себестоимости:", 
+                    min_value=1, value=1, step=1, key=f"portions_{recipe['id']}"
+                )
+                
+                st.divider()
                 view_col1, view_col2 = st.columns([1, 2])
                 
+                total_recipe_cost = 0.0
+                
                 with view_col1:
-                    st.markdown("**Ингредиенты:**")
+                    st.markdown("**Ингредиенты и стоимость:**")
                     for ing in recipe['ingredients']:
-                        st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']}")
+                        cost, warning = calculate_ingredient_cost(ing['name'], ing['quantity'], ing['unit'], system_prices)
+                        total_recipe_cost += cost
+                        
+                        if warning == "Нет цены в базе":
+                            st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']} — <span style='color:gray;'>*{warning}*</span>", unsafe_allow_html=True)
+                        elif "Несоответствие" in warning:
+                            st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']} — <span style='color:orange;'>*{warning}*</span>", unsafe_allow_html=True)
+                        else:
+                            st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']} — **${cost:.2f}** <span style='font-size:11px; color:green;'>{warning}</span>", unsafe_allow_html=True)
+                    
+                    st.divider()
+                    # Выводим финансовые метрики
+                    st.metric(label="💰 Себестоимость всего замеса:", value=f"${total_recipe_cost:.2f}")
+                    if portions > 1:
+                        st.metric(label="🍽️ Себестоимость 1 порции:", value=f"${(total_recipe_cost / portions):.2f}")
                 
                 with view_col2:
                     st.markdown("**Инструкция по приготовлению:**")
