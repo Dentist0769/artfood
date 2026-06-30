@@ -151,12 +151,56 @@ def clean_description(text: str) -> str:
 
     return text.strip()
 
+def get_youtube_data(video_url: str) -> Dict:
+    """Получает описание видео и очищает его"""
+    try:
+        import yt_dlp
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'socket_timeout': 15,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(video_url, download=False)
+            description = info.get('description', '')
+            clean_desc = clean_description(description)
+
+            return {
+                'description': clean_desc,
+                'title': info.get('title', 'Unknown'),
+                'comments': None
+            }
+    except Exception as e:
+        return {
+            'description': '',
+            'title': 'Unknown',
+            'comments': None,
+            'error': str(e)
+        }
+
+def get_page_text(url: str) -> Optional[str]:
+    """Парсит и очищает текст со страницы сайта"""
+    try:
+        import requests
+        from bs4 import BeautifulSoup
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers, timeout=10)
+        response.encoding = 'utf-8'
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            for script in soup(['script', 'style']):
+                script.decompose()
+            text = soup.get_text('\n')
+            return clean_description(text)
+        return None
+    except Exception as e:
+        return None
+
 def translate_text(text: str) -> str:
     """Переводит иностранный текст на русский язык без использования ключей API"""
     if not text:
         return ""
     
-    # Если в тексте нет английских букв, возвращаем без изменений
     if not re.search(r'[a-zA-Z]', text):
         return text
         
@@ -169,7 +213,6 @@ def translate_text(text: str) -> str:
         if not line_str:
             continue
         
-        # Переводим только строки, в которых есть латиница
         if not re.search(r'[a-zA-Z]', line_str):
             translated_lines.append(line_str)
             continue
@@ -208,7 +251,6 @@ def find_ingredients(text: str) -> List[Dict]:
                      'градусе', 'целью', 'цвет', 'время', 'температу', 'температур', 'процесс',
                      'духов', 'духовк', 'разогреть', 'выпекать', 'оставить', 'смешать', 'взбить'}
 
-    # Расширенная карта мер веса (включает полные русские названия после перевода)
     units_map = {
         'мл': 'мл', 'ml': 'мл', 'миллилитр': 'мл', 'миллилитров': 'мл', 'миллилитра': 'мл',
         'г': 'г', 'g': 'г', 'грамм': 'г', 'граммов': 'г', 'грамма': 'г',
@@ -249,7 +291,6 @@ def find_ingredients(text: str) -> List[Dict]:
         if any(keyword in line.lower() for keyword in ['начинка', 'для теста', 'для сиропа', 'рецепт']):
             continue
 
-        # Паттерн 1: Название....кол-во ед
         match = re.search(rf'([а-яa-z\s\(\)]+?)\.{2,}\s*(\d+(?:[.,]\d+)?)\s*(?:{all_units_pattern})', line, re.IGNORECASE)
         if match:
             name = match.group(1).strip()
@@ -266,7 +307,6 @@ def find_ingredients(text: str) -> List[Dict]:
             except:
                 pass
 
-        # Паттерн 2: Название - кол-во ед (учитывает любые виды тире)
         match = re.search(rf'([а-яa-z\s]+?)\s*[-—–]\s*(\d+(?:[.,]\d+)?)\s*({all_units_pattern})', line, re.IGNORECASE)
         if match:
             name = match.group(1).strip()
@@ -280,7 +320,6 @@ def find_ingredients(text: str) -> List[Dict]:
             except:
                 pass
 
-        # Паттерн 3: кол-во ед название
         match = re.search(rf'(\d+(?:[.,]\d+)?)\s*({all_units_pattern})\s+([а-яa-z\s\(\)]+?)(?:[,;]|$)', line, re.IGNORECASE)
         if match:
             quantity_str = match.group(1).replace(',', '.')
@@ -311,19 +350,17 @@ with tab1:
             if not video_url.strip():
                 st.error("❌ Введите ссылку")
             else:
-                with st.spinner("⏳ Загружаю, очищаю и переводжу описание видео..."):
+                with st.spinner("⏳ Загружаю, очищаю и перевожу описание видео..."):
                     data = get_youtube_data(video_url)
 
                 if data.get('error'):
                     st.error(f"❌ Ошибка: {data['error']}")
                 else:
-                    # Чистим и переводим финальный текст
                     translated_description = translate_text(data['description'])
                     translated_title = translate_text(data['title'])
                     
-                    st.success("✅ Описание успешно переведено и очищено от спама!")
+                    st.success("✅ Описание успешно переведено и очищено!)")
                     
-                    # Ищем ингредиенты уже в переведенном тексте
                     ingredients = find_ingredients(translated_description)
 
                     st.session_state.ingredients = ingredients
