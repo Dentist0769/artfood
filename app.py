@@ -39,21 +39,25 @@ def get_selenium_driver():
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
         chrome_options.add_argument("--start-maximized")
+        chrome_options.add_argument("--disable-software-rasterizer")
+        chrome_options.add_argument("--disable-extensions")
         chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
-        # Для Streamlit Cloud
-        if os.path.exists('/etc/chromium'):  # Streamlit Cloud indicator
-            chrome_options.add_argument("--disable-software-rasterizer")
-            chrome_options.add_argument("--disable-extensions")
+        # Попытка установить chromedriver
+        try:
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+        except Exception as e:
+            # Если chromedriver не работает, логируем и возвращаем None для fallback
+            logger.warning(f"ChromeDriver инициализация неудачна: {e}")
+            return None
 
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=chrome_options)
         driver.set_page_load_timeout(30)
         driver.set_script_timeout(30)
+        logger.info("✓ Selenium драйвер успешно инициализирован")
         return driver
     except Exception as e:
         logger.error(f"Ошибка инициализации Selenium: {e}")
-        st.warning(f"⚠️ Ошибка Selenium: {str(e)[:100]}")
         return None
 
 def init_db():
@@ -190,43 +194,69 @@ def get_prices() -> Dict[str, Dict]:
     return prices
 
 def clean_description(text: str) -> str:
-    """Очистить описание от ссылок, спама и HTML тегов"""
+    """Очистить описание от комментариев, тегов, ссылок и рекламы (НО НЕ инструкции!)"""
     if not text:
         return ""
 
+    # Удаление HTML тегов и сущностей
     text = re.sub(r'<[^>]+>', '', text)
     text = re.sub(r'&[a-z]+;', '', text)
 
+    # Удаление ссылок и номеров карт
     text = re.sub(r'https?://[^\s]+', '', text)
     text = re.sub(r'www\.[^\s]+', '', text)
     text = re.sub(r'\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b', '', text)
 
     lines = text.split('\n')
     filtered_lines = []
-    junk_keywords = [
+
+    # Ключевые слова РЕКЛАМЫ (НЕ инструкций)
+    ad_keywords = [
         'telegram', 'tg.me', 'монобанк', 'промокод', 'скидка', 'подпишись', 'subscribe',
         'instagram', 'инстаграм', 'vk.com', 'вконтакте', 'facebook', 'patreon', 'paypal',
         'донат', 'donat', 'поддержать канал', 'сбербанк', 'тинькофф', 'номер карты',
         'реквизиты', 'сотрудничество', 'cooperation', 'реклама', 'плейлист', 'смотрите также',
         'предыдущее видео', 'мой канал', 'tiktok', 'тикток', 'дзен', 'dzen',
-        'расшифровка', 'transcription', 'как это было сделано', 'жми на колокольчик', 'поставь лайк',
-        'dear friends', 'see you on my channel', 'time and attention', 'good mood', 'enjoy watching',
+        'жми на колокольчик', 'поставь лайк', 'dear friends', 'see you on my channel',
         'turn on subtitles', 'automatically translated', 'write to me', 'happy to answer',
-        'with pleasure and love', 'filled with warmth', 'sincerely wish', 'support the channel',
-        'helps and motivates', 'give a like', 'leave a comment', 'any questions', 'share the video',
-        'for your warmth', 'channel come alive', 'attention!'
+        'support the channel', 'give a like', 'leave a comment', 'share the video'
     ]
+
     for line in lines:
         line_strip = line.strip()
         if not line_strip:
             continue
-        if any(keyword in line_strip.lower() for keyword in junk_keywords):
+
+        # Удаляем строки с рекламой
+        if any(keyword in line_strip.lower() for keyword in ad_keywords):
             continue
+
+        # Удаляем строки только с цифрами, смайлами и датами (это комментарии)
+        if re.match(r'^[\d\s:,\.\-/😊😍❤️👍💯🔥😋🤩🎉]+$', line_strip):
+            continue
+
+        # Удаляем имена авторов комментариев (короткие строки только с буквами/пробелами)
+        # НО НЕ удаляем инструкции (они содержат слова типа "добавить", "варить" и т.д.)
+        if len(line_strip) < 25 and ' ' in line_strip:
+            # Проверяем это имя или инструкция
+            if re.match(r'^[А-Яа-яA-Za-z\s]+$', line_strip):
+                # Это похоже на имя, но проверим что это не инструкция
+                recipe_words = ['шаг', 'добавить', 'смешать', 'варить', 'жарить', 'пекать', 'готовить', 'положить',
+                               'залить', 'посыпать', 'украсить', 'перемешать', 'поставить', 'выпечь', 'включить',
+                               'нагреть', 'кипятить', 'тушить', 'мешать', 'взбить', 'натереть', 'нарезать']
+                if not any(word in line_strip.lower() for word in recipe_words):
+                    continue  # Это имя, удаляем
+
         filtered_lines.append(line_strip)
 
     text = '\n'.join(filtered_lines)
+
+    # Удаление хештегов
     text = re.sub(r'#[\w]+', '', text, flags=re.UNICODE | re.IGNORECASE)
+
+    # Очистка лишних пустых строк
     text = re.sub(r'\n{2,}', '\n', text)
+
     return text.strip()
 
 def get_page_text_fallback(url: str) -> Optional[str]:
@@ -243,16 +273,72 @@ def get_page_text_fallback(url: str) -> Optional[str]:
 
         soup = BeautifulSoup(response.text, 'html.parser')
 
+        # 1. СНАЧАЛА пытаемся найти schema.org Recipe JSON (самый чистый способ)
+        scripts = soup.find_all('script', type='application/ld+json')
+        for script in scripts:
+            try:
+                if not script.string:
+                    continue
+                data = json.loads(script.string)
+                recipes = []
+                def search_recipe(obj):
+                    if isinstance(obj, dict):
+                        if obj.get('@type') == 'Recipe' or (isinstance(obj.get('@type'), list) and 'Recipe' in obj.get('@type')):
+                            recipes.append(obj)
+                        for v in obj.values():
+                            search_recipe(v)
+                    elif isinstance(obj, list):
+                        for item in obj:
+                            search_recipe(item)
+                search_recipe(data)
+                if recipes:
+                    recipe = recipes[0]
+                    clean_lines = []
+                    ing_list = recipe.get('recipeIngredient', [])
+                    if ing_list:
+                        for ing in ing_list:
+                            clean_lines.append(ing.strip())
+                        clean_lines.append("")
+                    instructions_raw = recipe.get('recipeInstructions', [])
+                    if instructions_raw:
+                        raw_steps = []
+                        if isinstance(instructions_raw, list):
+                            for step in instructions_raw:
+                                if isinstance(step, dict):
+                                    raw_steps.append(step.get('text', step.get('name', '')))
+                                elif isinstance(step, str):
+                                    raw_steps.append(step)
+                        elif isinstance(instructions_raw, str):
+                            raw_steps.append(instructions_raw)
+                        for idx, step_text in enumerate(raw_steps, 1):
+                            if step_text:
+                                step_pure = BeautifulSoup(step_text, 'html.parser').get_text().strip()
+                                clean_lines.append(f"Шаг {idx}. {step_pure}")
+                    combined = "\n".join(clean_lines).strip()
+                    if len(combined) > 50:
+                        return clean_description(combined)
+            except Exception as e:
+                logger.error(f"Ошибка парсинга schema.org: {e}")
+                continue
+
+        # 2. Если schema.org не нашли, очищаем страницу от мусора
         # Удаление ненужных элементов
         for tag in ['script', 'style', 'nav', 'header', 'footer', 'aside', 'form', 'noscript', 'button', 'svg']:
             for element in soup.find_all(tag):
                 element.decompose()
 
-        for selector in ['.header', '.footer', '.menu', '.sidebar', '.nav', '.breadcrumbs', '.comments', '.banner', '.sharing', '.ads', '.advertisement', '.related', '.recommend']:
+        # Удаление элементов по классам и ID (мусор, комментарии, авторы)
+        for selector in ['.header', '.footer', '.menu', '.sidebar', '.nav', '.breadcrumbs', '.comments', '.banner', '.sharing', '.ads', '.advertisement', '.related', '.recommend', '.author-info', '.user-comments', '.review', '.rating', '#comments', '#reviews']:
             for element in soup.select(selector):
                 element.decompose()
 
-        text = soup.get_text('\n')
+        # Поиск основного контента - обычно в article, main, или div с рецептом
+        main_content = soup.find('article') or soup.find('main') or soup.find('div', class_='recipe') or soup.find('div', class_='content')
+        if main_content:
+            text = main_content.get_text('\n')
+        else:
+            text = soup.get_text('\n')
+
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         result = clean_description('\n'.join(lines))
 
@@ -791,4 +877,3 @@ with tab3:
                 st.error("❌ Введи название ингредиента")
     else:
         st.info("📌 База цен пуста.")
-
