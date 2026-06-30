@@ -175,7 +175,7 @@ def get_youtube_data(video_url: str) -> Dict:
         }
 
 def get_page_text(url: str) -> Optional[str]:
-    """Парсит и очищает текст со страницы сайта, извлекая только чистый контент рецепта"""
+    """Парсит и очищает текст со страницы сайта, извлекая структурированный рецепт с переносами строк"""
     try:
         import requests
         from bs4 import BeautifulSoup
@@ -189,6 +189,7 @@ def get_page_text(url: str) -> Optional[str]:
             
         soup = BeautifulSoup(response.text, 'html.parser')
         
+        # --- СТРАТЕГИЯ 1: Извлечение через JSON-LD (микроразметка Schema.org) ---
         scripts = soup.find_all('script', type='application/ld+json')
         for script in scripts:
             try:
@@ -243,6 +244,7 @@ def get_page_text(url: str) -> Optional[str]:
             except:
                 continue
                 
+        # --- СТРАТЕГИЯ 2: Резервная жесткая очистка HTML (сохраняя перенос строк) ---
         for trash_tag in ['script', 'style', 'nav', 'header', 'footer', 'aside', 'form', 'noscript', 'button', 'svg']:
             for element in soup.find_all(trash_tag):
                 element.decompose()
@@ -251,7 +253,9 @@ def get_page_text(url: str) -> Optional[str]:
             for element in soup.select(selector):
                 element.decompose()
                 
-        text = soup.get_text('\n')
+        # Извлекаем текст построчно, чтобы не потерять структуру
+        lines = [line.strip() for line in soup.get_text('\n').splitlines() if line.strip()]
+        text = '\n'.join(lines)
         return clean_description(text)
         
     except Exception as e:
@@ -333,7 +337,6 @@ def find_ingredients(text: str) -> List[Dict]:
             return
 
         name = re.sub(r'[,;.!?—()\[\]]', '', name).strip()
-        # Очищаем от мусорных кулинарных приставок в начале строки
         name = re.sub(r'^(хороший пучок|пучок|долька|дольки|зубчик|зубчика)\s+', '', name, flags=re.IGNORECASE)
         
         if len(name) < 2 or len(name) > 50:
@@ -356,10 +359,10 @@ def find_ingredients(text: str) -> List[Dict]:
         if any(keyword in line.lower() for keyword in ['начинка', 'для теста', 'для сиропа', 'рецепт']):
             continue
 
-        # 1. Умное схлопывание числовых диапазонов (например, "2-3 ст л" станет "3 ст л")
+        # Схлопывание числовых диапазонов (например, "2-3 ст л" -> "3 ст л")
         line = re.sub(r'(\d+(?:[.,]\d+)?)\s*[-—–]\s*(\d+(?:[.,]\d+)?)', r'\2', line)
 
-        # 2. Полное удаление круглых скобок автора во избежание попадания мусора в имя
+        # Удаление круглых скобок автора
         line = re.sub(r'\(.*?\)', '', line).strip()
 
         # Паттерн 1: Название....кол-во ед
@@ -379,7 +382,7 @@ def find_ingredients(text: str) -> List[Dict]:
             except:
                 pass
 
-        # Паттерн 2: Название — кол-во ед (теперь включая двоеточия)
+        # Паттерн 2: Название — кол-во ед (включая двоеточия)
         match = re.search(rf'([а-яa-z\s]+?)\s*[-—–:]\s*(\d+(?:[.,]\d+)?)\s*({all_units_pattern})', line, re.IGNORECASE)
         if match:
             name = match.group(1).strip()
@@ -407,13 +410,27 @@ def find_ingredients(text: str) -> List[Dict]:
             except:
                 pass
 
+        # КРИТИЧЕСКИЙ ПАТТЕРН 4 (для сайтов): Название кол-во ед (без знаков препинания)
+        # Пример: "Пшеничная мука хлебопекарная 450 г" или "Вода 260 мл"
+        match = re.search(rf'([а-яa-z\s\(\)]+?)\s+(\d+(?:[.,]\d+)?)\s*({all_units_pattern})\b', line, re.IGNORECASE)
+        if match:
+            name = match.group(1).strip()
+            quantity_str = match.group(2).replace(',', '.')
+            unit = match.group(3).lower()
+            try:
+                quantity = float(quantity_str)
+                unit = units_map.get(unit, 'шт')
+                add_ingredient(name, quantity, unit)
+                continue
+            except:
+                pass
+
     return ingredients
 
 def calculate_ingredient_cost(name: str, qty: float, unit: str, prices: dict) -> tuple[float, str]:
     """Интеллектуальный расчет стоимости с поддержкой синонимов и конверсий ШТ в КГ"""
     name_clean = name.lower().strip()
     
-    # 1. Карта синонимов для идеального мэтчинга с базой P&P
     SYNONYMS = {
         'кабачки': 'цуккини',
         'кабачок': 'цуккини',
@@ -424,7 +441,9 @@ def calculate_ingredient_cost(name: str, qty: float, unit: str, prices: dict) ->
         'подсолнечное масло': 'масло подсолнечное',
         'соевый соус': 'соус соевый',
         'горчица в зернах': 'горчица',
-        'лимонный сок': 'лимон желтый'
+        'лимонный сок': 'лимон желтый',
+        'белокочанная капуста': 'белокочанная капуста',
+        'капуста': 'белокочанная капуста'
     }
     
     for syn_k, syn_v in SYNONYMS.items():
@@ -434,7 +453,6 @@ def calculate_ingredient_cost(name: str, qty: float, unit: str, prices: dict) ->
             
     p_data = prices.get(name_clean)
     
-    # Поиск по вхождению, если точного совпадения нет
     if not p_data:
         for k, v in prices.items():
             if k in name_clean or name_clean in k:
@@ -452,31 +470,29 @@ def calculate_ingredient_cost(name: str, qty: float, unit: str, prices: dict) ->
     if u_rec == p_unit:
         return qty * p_price, ""
         
-    # 2. КРИТИЧЕСКИЙ БЛОК: Конверсия ШТ в КГ (когда в рецепте штуки, а цена за кг)
     if u_rec == 'шт' and p_unit in ['кг', 'kg']:
         AVG_WEIGHTS = {
-            'помидоры': 0.12,      # 120г средний томат
-            'цуккини': 0.30,       # 300г средний кабачок
-            'лук репчатый': 0.10,   # 100г луковица
+            'помидоры': 0.12,
+            'цуккини': 0.30,
+            'лук репчатый': 0.10,
             'красный лук': 0.10,
-            'чеснок': 0.01,        # 10г один зубчик
+            'чеснок': 0.01,
             'лимон желтый': 0.12,
-            'куриное яйцо': 1.0     # Яйца в P&P идут поштучно ($0.15), так что коэффициент 1
+            'куриное яйцо': 1.0     # Яйца поштучно в P&P Wholesale
         }
         
-        avg_weight = 0.10 # Дежурные 100 грамм, если продукта нет в списке средних весов
+        avg_weight = 0.10
         for w_k, w_v in AVG_WEIGHTS.items():
             if w_k in name_clean:
                 avg_weight = w_v
                 break
                 
-        if avg_weight == 1.0: # Для яиц, продающихся поштучно
+        if avg_weight == 1.0:
             return qty * p_price, ""
             
         weight_in_kg = qty * avg_weight
         return weight_in_kg * p_price, f" (перевод из шт в кг: ~{avg_weight*1000:.0f}г/шт)"
         
-    # Если в прайсе КГ, а в рецепте граммы/ложки
     if p_unit in ['кг', 'kg']:
         if u_rec in ['г', 'g', 'грамм', 'граммов', 'грамма']:
             return (qty / 1000.0) * p_price, ""
@@ -485,7 +501,6 @@ def calculate_ingredient_cost(name: str, qty: float, unit: str, prices: dict) ->
         elif u_rec in ['ст.л', 'ст л']:
             return (qty * 15.0 / 1000.0) * p_price, " (расчет как ~15г)"
             
-    # Если в прайсе Л, а в рецепте мл/ложки
     if p_unit in ['л', 'l', 'литр']:
         if u_rec in ['мл', 'ml', 'миллилитр']:
             return (qty / 1000.0) * p_price, ""
@@ -542,7 +557,7 @@ with tab1:
 
                 if page_text and len(page_text) > 100:
                     translated_page = translate_text(page_text)
-                    st.success("✅ Страница загружена и очищена!")
+                    st.success("✅ Страница загружена!")
                     ingredients = find_ingredients(translated_page)
                     
                     st.session_state.ingredients = ingredients
@@ -550,7 +565,7 @@ with tab1:
                     st.session_state.video_url = page_url
                     st.session_state.video_title = "Рецепт со страницы"
                 else:
-                    st.error("❌ Не удалось загрузить страницу")
+                    st.error("❌ Не удалось загрузить страницу или извлечь чистый текст рецепта")
 
     if 'recipe_description' in st.session_state:
         st.divider()
@@ -704,15 +719,4 @@ with tab3:
         st.write("**Добавить/изменить цену вручную:**")
         col1, col2, col3 = st.columns(3)
         with col1:
-            ing_name = st.text_input("Ингредиент:", placeholder="Например: молоко")
-        with col2:
-            ing_price = st.number_input("Цена:", min_value=0.0, step=10.0)
-        with col3:
-            ing_unit = st.selectbox("Единица:", ["г", "мл", "шт", "л", "кг"])
-        if st.button("➕ Добавить цену", use_container_width=True):
-            if ing_name.strip():
-                save_prices({ing_name: {'price': ing_price, 'unit': ing_unit}})
-                st.success(f"✅ Цена для '{ing_name}' добавлена!")
-                st.rerun()
-    else:
-        st.info("📌 Цены не загружены.")
+            ing_name = st.text_input("Ингредиент:", placeholder="На
