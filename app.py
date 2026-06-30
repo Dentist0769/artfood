@@ -20,11 +20,10 @@ def init_db():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
     
-    # Безопасное добавление колонки для описания процесса, если базы уже существуют
     try:
         c.execute('''ALTER TABLE recipes ADD COLUMN description TEXT''')
     except sqlite3.OperationalError:
-        pass # Колонка уже есть
+        pass # Колонка уже существует
         
     c.execute('''CREATE TABLE IF NOT EXISTS prices (
         id INTEGER PRIMARY KEY,
@@ -51,7 +50,7 @@ def get_recipes(category: Optional[str] = None) -> List[Dict]:
     c = conn.cursor()
     if category:
         c.execute('''SELECT id, name, category, ingredients, video_url, created_at, description
-                     FROM recipes WHERE category = ? ORDER BY CREATED_AT DESC''', (category,))
+                     FROM recipes WHERE category = ? ORDER BY created_at DESC''', (category,))
     else:
         c.execute('''SELECT id, name, category, ingredients, video_url, created_at, description
                      FROM recipes ORDER BY created_at DESC''')
@@ -107,95 +106,97 @@ def get_video_id(url: str) -> Optional[str]:
         return None
 
 def clean_description(text: str) -> str:
-    """Глубокая очистка описания от ссылок, хэштегов, реквизитов и соцсетей"""
+    """Глубокая очистка текста от ссылок, хэштегов, реквизитов, соцсетей и блогерских призывов"""
     if not text:
         return ""
 
-    # Удаляем стандартные веб-ссылки
+    # Удаляем ссылки
     text = re.sub(r'https?://[^\s]+', '', text)
     text = re.sub(r'www\.[^\s]+', '', text)
     
-    # Удаляем номера банковских карт (16 цифр с пробелами или дефисами)
+    # Удаляем номера карт
     text = re.sub(r'\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b', '', text)
 
     lines = text.split('\n')
     filtered_lines = []
     
-    # Расширенный список мусорных маркеров блогеров
+    # Расширенный список мусорных фраз (RU + EN из скриншотов)
     junk_keywords = [
         'telegram', 'tg.me', 'монобанк', 'промокод', 'скидка', 'подпишись', 'subscribe',
         'instagram', 'инстаграм', 'vk.com', 'вконтакте', 'facebook', 'patreon', 'paypal', 
         'донат', 'donat', 'поддержать канал', 'сбербанк', 'тинькофф', 'номер карты', 
         'реквизиты', 'сотрудничество', 'cooperation', 'реклама', 'плейлист', 'смотрите также', 
         'предыдущее видео', 'мой канал', 'tiktok', 'тикток', 'дзен', 'dzen',
-        'расшифровка', 'transcription', 'как это было сделано', 'жми на колокольчик', 'поставь лайк'
+        'расшифровка', 'transcription', 'как это было сделано', 'жми на колокольчик', 'поставь лайк',
+        'dear friends', 'see you on my channel', 'time and attention', 'good mood', 'enjoy watching',
+        'turn on subtitles', 'automatically translated', 'write to me', 'happy to answer',
+        'with pleasure and love', 'filled with warmth', 'sincerely wish', 'support the channel',
+        'helps and motivates', 'give a like', 'leave a comment', 'any questions', 'share the video',
+        'for your warmth', 'channel come alive', 'attention!', 'ингредиенты:', 'ingredients:'
     ]
     
     for line in lines:
-        line_lower = line.lower()
-        # Если строка содержит мусорное слово, мы её полностью пропускаем
+        line_strip = line.strip()
+        line_lower = line_strip.lower()
+        if not line_strip:
+            continue
         if any(keyword in line_lower for keyword in junk_keywords):
             continue
-        filtered_lines.append(line)
+        filtered_lines.append(line_strip)
         
     text = '\n'.join(filtered_lines)
-
-    # Удаляем хэштеги целиком
     text = re.sub(r'#[а-яa-z0-9_]+', '', text, flags=re.IGNORECASE)
-
-    # Чистим множественные пустые строки и пробелы
     text = re.sub(r'\n{2,}', '\n', text)
     text = re.sub(r' +', ' ', text)
 
     return text.strip()
 
-def get_youtube_data(video_url: str) -> Dict:
-    """Получает описание видео и очищает его"""
-    try:
-        import yt_dlp
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'socket_timeout': 15,
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_url, download=False)
-            description = info.get('description', '')
-            clean_desc = clean_description(description)
-
-            return {
-                'description': clean_desc,
-                'title': info.get('title', 'Unknown'),
-                'comments': None
+def translate_text(text: str) -> str:
+    """Переводит иностранный текст на русский язык без использования ключей API"""
+    if not text:
+        return ""
+    
+    # Если в тексте нет английских букв, возвращаем без изменений
+    if not re.search(r'[a-zA-Z]', text):
+        return text
+        
+    import requests
+    lines = text.split('\n')
+    translated_lines = []
+    
+    for line in lines:
+        line_str = line.strip()
+        if not line_str:
+            continue
+        
+        # Переводим только строки, в которых есть латиница
+        if not re.search(r'[a-zA-Z]', line_str):
+            translated_lines.append(line_str)
+            continue
+            
+        try:
+            url = "https://translate.googleapis.com/translate_a/single"
+            params = {
+                "client": "gtx",
+                "sl": "auto",
+                "tl": "ru",
+                "dt": "t",
+                "q": line_str
             }
-    except Exception as e:
-        return {
-            'description': '',
-            'title': 'Unknown',
-            'comments': None,
-            'error': str(e)
-        }
-
-def get_page_text(url: str) -> Optional[str]:
-    """Парсит и очищает текст со страницы сайта"""
-    try:
-        import requests
-        from bs4 import BeautifulSoup
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers, timeout=10)
-        response.encoding = 'utf-8'
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            for script in soup(['script', 'style']):
-                script.decompose()
-            text = soup.get_text('\n')
-            return clean_description(text)
-        return None
-    except Exception as e:
-        return None
+            response = requests.get(url, params=params, timeout=5)
+            if response.status_code == 200:
+                res_json = response.json()
+                translated_chunk = "".join([part[0] for part in res_json[0] if part[0]])
+                translated_lines.append(translated_chunk.strip())
+            else:
+                translated_lines.append(line_str)
+        except:
+            translated_lines.append(line_str)
+            
+    return "\n".join(translated_lines)
 
 def find_ingredients(text: str) -> List[Dict]:
-    """Находит ингредиенты в тексте"""
+    """Автоматически извлекает ингредиенты и объемы из переведенного текста"""
     if not text:
         return []
 
@@ -207,12 +208,15 @@ def find_ingredients(text: str) -> List[Dict]:
                      'градусе', 'целью', 'цвет', 'время', 'температу', 'температур', 'процесс',
                      'духов', 'духовк', 'разогреть', 'выпекать', 'оставить', 'смешать', 'взбить'}
 
+    # Расширенная карта мер веса (включает полные русские названия после перевода)
     units_map = {
-        'мл': 'мл', 'ml': 'мл', 'г': 'г', 'g': 'г', 'кг': 'кг', 'kg': 'кг',
-        'л': 'л', 'l': 'л', 'мг': 'мг', 'mg': 'мг',
+        'мл': 'мл', 'ml': 'мл', 'миллилитр': 'мл', 'миллилитров': 'мл', 'миллилитра': 'мл',
+        'г': 'г', 'g': 'г', 'грамм': 'г', 'граммов': 'г', 'грамма': 'г',
+        'кг': 'кг', 'kg': 'кг', 'килограмм': 'кг', 'килограмма': 'кг',
+        'л': 'л', 'l': 'л', 'литр': 'л', 'литров': 'л', 'литра': 'л',
         'шт': 'шт', 'pcs': 'шт', 'штук': 'шт', 'штука': 'шт', 'штуки': 'шт',
-        'ст.л': 'ст.л', 'ст л': 'ст.л', 'tbsp': 'ст.л', 'столов': 'ст.л', 'ложка': 'ст.л',
-        'ч.л': 'ч.л', 'ч л': 'ч.л', 'tsp': 'ч.л', 'чайн': 'ч.л',
+        'ст.л': 'ст.л', 'ст л': 'ст.л', 'tbsp': 'ст.л', 'столовая': 'ст.л', 'столовых': 'ст.л', 'столовые': 'ст.л', 'ложка': 'ст.л', 'ложки': 'ст.л',
+        'ч.л': 'ч.л', 'ч л': 'ч.л', 'tsp': 'ч.л', 'чайная': 'ч.л', 'чайных': 'ч.л', 'чайные': 'ч.л'
     }
 
     def add_ingredient(name: str, quantity: float, unit: str):
@@ -235,15 +239,18 @@ def find_ingredients(text: str) -> List[Dict]:
             ingredients.append({'name': name.lower(), 'quantity': quantity, 'unit': unit})
             seen.add(key)
 
+    all_units_pattern = "|".join(sorted(units_map.keys(), key=len, reverse=True))
+
     for line in lines:
         line = line.strip()
         if not line or len(line) < 3:
             continue
 
-        if any(keyword in line.lower() for keyword in ['начинка', 'для теста', 'для сиропа', 'ингредиент', 'рецепт']):
+        if any(keyword in line.lower() for keyword in ['начинка', 'для теста', 'для сиропа', 'рецепт']):
             continue
 
-        match = re.search(r'([а-яa-z\s\(\)]+?)\.{2,}\s*(\d+(?:[.,]\d+)?)\s*(?:кг|г|мл|л|шт|ст\.л|ч\.л|ст л|ч л)', line, re.IGNORECASE)
+        # Паттерн 1: Название....кол-во ед
+        match = re.search(rf'([а-яa-z\s\(\)]+?)\.{2,}\s*(\d+(?:[.,]\d+)?)\s*(?:{all_units_pattern})', line, re.IGNORECASE)
         if match:
             name = match.group(1).strip()
             quantity_str = match.group(2).replace(',', '.')
@@ -259,7 +266,8 @@ def find_ingredients(text: str) -> List[Dict]:
             except:
                 pass
 
-        match = re.search(rf'([а-яa-z\s]+?)\s*—\s*(\d+(?:[.,]\d+)?)\s*({"|".join(units_map.keys())})', line, re.IGNORECASE)
+        # Паттерн 2: Название - кол-во ед (учитывает любые виды тире)
+        match = re.search(rf'([а-яa-z\s]+?)\s*[-—–]\s*(\d+(?:[.,]\d+)?)\s*({all_units_pattern})', line, re.IGNORECASE)
         if match:
             name = match.group(1).strip()
             quantity_str = match.group(2).replace(',', '.')
@@ -272,7 +280,8 @@ def find_ingredients(text: str) -> List[Dict]:
             except:
                 pass
 
-        match = re.search(rf'(\d+(?:[.,]\d+)?)\s*({"|".join(units_map.keys())})\s+([а-яa-z\s\(\)]+?)(?:[,;]|$)', line, re.IGNORECASE)
+        # Паттерн 3: кол-во ед название
+        match = re.search(rf'(\d+(?:[.,]\d+)?)\s*({all_units_pattern})\s+([а-яa-z\s\(\)]+?)(?:[,;]|$)', line, re.IGNORECASE)
         if match:
             quantity_str = match.group(1).replace(',', '.')
             unit = match.group(2).lower()
@@ -302,22 +311,28 @@ with tab1:
             if not video_url.strip():
                 st.error("❌ Введите ссылку")
             else:
-                with st.spinner("⏳ Загружаю описание видео..."):
+                with st.spinner("⏳ Загружаю, очищаю и переводжу описание видео..."):
                     data = get_youtube_data(video_url)
 
                 if data.get('error'):
                     st.error(f"❌ Ошибка: {data['error']}")
                 else:
-                    st.success("✅ Описание загружено!")
-                    ingredients = find_ingredients(data['description'])
+                    # Чистим и переводим финальный текст
+                    translated_description = translate_text(data['description'])
+                    translated_title = translate_text(data['title'])
+                    
+                    st.success("✅ Описание успешно переведено и очищено от спама!")
+                    
+                    # Ищем ингредиенты уже в переведенном тексте
+                    ingredients = find_ingredients(translated_description)
 
                     st.session_state.ingredients = ingredients
-                    st.session_state.recipe_description = data['description']
+                    st.session_state.recipe_description = translated_description
                     st.session_state.video_url = video_url
-                    st.session_state.video_title = data['title']
+                    st.session_state.video_title = translated_title
                     
                     if not ingredients:
-                        st.warning("⚠️ Список ингредиентов автоматически не распознан, но текст сохранен. Вы сможете настроить его вручную.")
+                        st.warning("⚠️ Список ингредиентов автоматически не определен. Вы сможете настроить его в текстовом поле.")
 
     else:
         page_url = st.text_input("Ссылка на страницу:", placeholder="https://example.com/recipe...")
@@ -329,19 +344,19 @@ with tab1:
                     page_text = get_page_text(page_url)
 
                 if page_text and len(page_text) > 100:
-                    st.success("✅ Страница загружена!")
-                    ingredients = find_ingredients(page_text)
+                    translated_page = translate_text(page_text)
+                    st.success("✅ Страница загружена и переведена!")
+                    ingredients = find_ingredients(translated_page)
                     
                     st.session_state.ingredients = ingredients
-                    st.session_state.recipe_description = page_text
+                    st.session_state.recipe_description = translated_page
                     st.session_state.video_url = page_url
                     st.session_state.video_title = "Рецепт со страницы"
                 else:
-                    st.error("❌ Не удалось загрузить страницу или текст слишком короткий")
+                    st.error("❌ Не удалось загрузить страницу")
 
     if 'recipe_description' in st.session_state:
         st.divider()
-        
         col_ing, col_desc = st.columns([1, 2])
         
         with col_ing:
@@ -350,19 +365,18 @@ with tab1:
                 for ing in st.session_state.ingredients:
                     st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']}")
             else:
-                st.info("Компоненты не найдены. Они могут быть внутри текста ниже.")
+                st.info("Компоненты пустые — добавьте их при необходимости в текст инструкции.")
         
         with col_desc:
             st.subheader("📝 Процесс приготовления:")
-            # Позволяем пользователю отредактировать очищенный текст перед финальным сохранением
             edited_description = st.text_area(
-                "Текст рецепта (мусор удален автоматически):", 
+                "Текст рецепта (на русском, без лишнего мусора):", 
                 value=st.session_state.recipe_description, 
                 height=300
             )
 
         st.divider()
-        st.subheader("💾 Сохранить рецепт в базу")
+        st.subheader("💾 Сохранить рецепт")
         default_name = st.session_state.get('video_title', '')
         recipe_name = st.text_input("Название рецепта:", value=default_name)
         category = st.selectbox("Категория:", CATEGORIES)
@@ -373,9 +387,8 @@ with tab1:
             else:
                 v_url = st.session_state.get('video_url')
                 save_recipe(recipe_name, category, st.session_state.ingredients, edited_description, v_url)
-                st.success(f"✅ Рецепт '{recipe_name}' успешно сохранен!")
+                st.success(f"✅ Рецепт '{recipe_name}' сохранен!")
                 
-                # Очистка сессии
                 del st.session_state.ingredients
                 del st.session_state.recipe_description
                 st.rerun()
@@ -393,7 +406,7 @@ with tab2:
             with st.expander(f"📄 {recipe['name']} ({recipe['category']})"):
                 st.write(f"**Дата добавления:** {recipe['created_at']}")
                 if recipe['video_url']:
-                    st.write(f"**Ссылка на источник:** [Открыть]({recipe['video_url']})")
+                    st.write(f"**Источник:** [Открыть ссылку]({recipe['video_url']})")
                 
                 st.divider()
                 view_col1, view_col2 = st.columns([1, 2])
@@ -416,7 +429,7 @@ with tab2:
                     st.success("✅ Рецепт удален")
                     st.rerun()
     else:
-        st.info("📌 Рецептов нет. Загрузите рецепт в вкладке 'Загрузка'")
+        st.info("📌 Рецептов нет.")
 
 with tab3:
     st.subheader("💰 Управление ценами")
@@ -482,4 +495,4 @@ with tab3:
                 st.success(f"✅ Цена для '{ing_name}' добавлена!")
                 st.rerun()
     else:
-        st.info("📌 Цены не загружены. Загрузите прайс-лист выше")
+        st.info("📌 Цены не загружены.")
