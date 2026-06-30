@@ -3,6 +3,9 @@ import re
 import sqlite3
 from typing import Optional, List, Dict
 import pandas as pd
+import json
+import requests
+from bs4 import BeautifulSoup
 
 st.set_page_config(page_title="🍳 Кулинарный калькулятор PRO", layout="wide")
 st.title("🍳 Кулинарный калькулятор (PRO)")
@@ -19,12 +22,10 @@ def init_db():
         video_url TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
-    
     try:
         c.execute('''ALTER TABLE recipes ADD COLUMN description TEXT''')
     except sqlite3.OperationalError:
-        pass # Колонка уже существует
-        
+        pass
     c.execute('''CREATE TABLE IF NOT EXISTS prices (
         id INTEGER PRIMARY KEY,
         ingredient TEXT UNIQUE NOT NULL,
@@ -38,7 +39,6 @@ def init_db():
 def save_recipe(name: str, category: str, ingredients: List[Dict], description: str, video_url: Optional[str] = None):
     conn = sqlite3.connect('recipes.db')
     c = conn.cursor()
-    import json
     ingredients_json = json.dumps(ingredients)
     c.execute('''INSERT INTO recipes (name, category, ingredients, description, video_url)
                  VALUES (?, ?, ?, ?, ?)''', (name, category, ingredients_json, description, video_url))
@@ -58,7 +58,6 @@ def get_recipes(category: Optional[str] = None) -> List[Dict]:
     conn.close()
     recipes = []
     for row in rows:
-        import json
         recipes.append({
             'id': row[0],
             'name': row[1],
@@ -97,26 +96,16 @@ def get_prices() -> Dict[str, Dict]:
         prices[row[0]] = {'price': row[1], 'unit': row[2]}
     return prices
 
-def get_video_id(url: str) -> Optional[str]:
-    try:
-        pattern = r'(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&\n?#]+)'
-        match = re.search(pattern, url)
-        return match.group(1) if match else None
-    except:
-        return None
-
 def clean_description(text: str) -> str:
-    """Глубокая очистка текста от ссылок, хэштегов, реквизитов, соцсетей и блогерских призывов"""
+    """Очистка текста от ссылок, реквизитов и блогерского спама"""
     if not text:
         return ""
-
     text = re.sub(r'https?://[^\s]+', '', text)
     text = re.sub(r'www\.[^\s]+', '', text)
     text = re.sub(r'\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b', '', text)
 
     lines = text.split('\n')
     filtered_lines = []
-    
     junk_keywords = [
         'telegram', 'tg.me', 'монобанк', 'промокод', 'скидка', 'подпишись', 'subscribe',
         'instagram', 'инстаграм', 'vk.com', 'вконтакте', 'facebook', 'patreon', 'paypal', 
@@ -130,73 +119,49 @@ def clean_description(text: str) -> str:
         'helps and motivates', 'give a like', 'leave a comment', 'any questions', 'share the video',
         'for your warmth', 'channel come alive', 'attention!', 'ингредиенты:', 'ingredients:'
     ]
-    
     for line in lines:
         line_strip = line.strip()
-        line_lower = line_strip.lower()
         if not line_strip:
             continue
-        if any(keyword in line_lower for keyword in junk_keywords):
+        if any(keyword in line_strip.lower() for keyword in junk_keywords):
             continue
         filtered_lines.append(line_strip)
         
     text = '\n'.join(filtered_lines)
     text = re.sub(r'#[а-яa-z0-9_]+', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\n{2,}', '\n', text)
-    text = re.sub(r' +', ' ', text)
-
     return text.strip()
 
 def get_youtube_data(video_url: str) -> Dict:
-    """Получает описание видео и очищает его"""
     try:
         import yt_dlp
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'socket_timeout': 15,
-        }
+        ydl_opts = {'quiet': True, 'no_warnings': True, 'socket_timeout': 15}
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video_url, download=False)
-            description = info.get('description', '')
-            clean_desc = clean_description(description)
-
             return {
-                'description': clean_desc,
+                'description': clean_description(info.get('description', '')),
                 'title': info.get('title', 'Unknown'),
-                'comments': None
+                'error': None
             }
     except Exception as e:
-        return {
-            'description': '',
-            'title': 'Unknown',
-            'comments': None,
-            'error': str(e)
-        }
+        return {'description': '', 'title': 'Unknown', 'error': str(e)}
 
 def get_page_text(url: str) -> Optional[str]:
-    """Парсит и очищает текст со страницы сайта, извлекая структурированный рецепт с переносами строк"""
+    """Парсинг кулинарных сайтов с приоритетом на JSON-LD Recipe"""
     try:
-        import requests
-        from bs4 import BeautifulSoup
-        import json
-        
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         response = requests.get(url, headers=headers, timeout=10)
         response.encoding = 'utf-8'
         if response.status_code != 200:
             return None
-            
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # --- СТРАТЕГИЯ 1: Извлечение через JSON-LD (микроразметка Schema.org) ---
         scripts = soup.find_all('script', type='application/ld+json')
         for script in scripts:
             try:
                 if not script.string:
                     continue
                 data = json.loads(script.string)
-                
                 recipes = []
                 def search_recipe(obj):
                     if isinstance(obj, dict):
@@ -207,20 +172,15 @@ def get_page_text(url: str) -> Optional[str]:
                     elif isinstance(obj, list):
                         for item in obj:
                             search_recipe(item)
-                            
                 search_recipe(data)
-                
                 if recipes:
                     recipe = recipes[0]
                     clean_lines = []
-                    
                     ing_list = recipe.get('recipeIngredient', [])
                     if ing_list:
                         for ing in ing_list:
-                            if isinstance(ing, str):
-                                clean_lines.append(ing.strip())
+                            clean_lines.append(ing.strip())
                         clean_lines.append("")
-                        
                     instructions_raw = recipe.get('recipeInstructions', [])
                     if instructions_raw:
                         steps = []
@@ -232,497 +192,272 @@ def get_page_text(url: str) -> Optional[str]:
                                     steps.append(step)
                         elif isinstance(instructions_raw, str):
                             steps.append(instructions_raw)
-                            
                         for idx, step_text in enumerate(steps, 1):
                             if step_text:
-                                step_pure = BeautifulSoup(step_text, "html.parser").get_text()
-                                clean_lines.append(f"Шаг {idx}. {step_pure.strip()}")
-                                
-                    combined_text = "\n".join(clean_lines).strip()
-                    if len(combined_text) > 50:
-                        return clean_description(combined_text)
+                                steps.append(f"Шаг {idx}. {BeautifulSoup(step_text, 'html.parser').get_text().strip()}")
+                    combined = "\n".join(clean_lines).strip()
+                    if len(combined) > 50:
+                        return clean_description(combined)
             except:
                 continue
-                
-        # --- СТРАТЕГИЯ 2: Резервная жесткая очистка HTML (сохраняя перенос строк) ---
-        for trash_tag in ['script', 'style', 'nav', 'header', 'footer', 'aside', 'form', 'noscript', 'button', 'svg']:
-            for element in soup.find_all(trash_tag):
+
+        for tag in ['script', 'style', 'nav', 'header', 'footer', 'aside', 'form', 'noscript', 'button', 'svg']:
+            for element in soup.find_all(tag):
                 element.decompose()
-                
         for selector in ['.header', '.footer', '.menu', '.sidebar', '.nav', '.breadcrumbs', '.comments', '.banner', '.sharing']:
             for element in soup.select(selector):
                 element.decompose()
-                
-        lines = [line.strip() for line in soup.get_text('\n').splitlines() if line.strip()]
-        text = '\n'.join(lines)
-        return clean_description(text)
-        
-    except Exception as e:
+        return clean_description(soup.get_text('\n'))
+    except:
         return None
 
 def translate_text(text: str) -> str:
-    """Переводит иностранный текст на русский язык без использования ключей API"""
-    if not text:
-        return ""
-    
-    if not re.search(r'[a-zA-Z]', text):
+    if not text or not re.search(r'[a-zA-Z]', text):
         return text
-        
-    import requests
     lines = text.split('\n')
-    translated_lines = []
-    
+    translated = []
     for line in lines:
         line_str = line.strip()
-        if not line_str:
+        if not line_str or not re.search(r'[a-zA-Z]', line_str):
+            translated.append(line_str)
             continue
-        
-        if not re.search(r'[a-zA-Z]', line_str):
-            translated_lines.append(line_str)
-            continue
-            
         try:
             url = "https://translate.googleapis.com/translate_a/single"
-            params = {
-                "client": "gtx",
-                "sl": "auto",
-                "tl": "ru",
-                "dt": "t",
-                "q": line_str
-            }
-            response = requests.get(url, params=params, timeout=5)
-            if response.status_code == 200:
-                res_json = response.json()
-                translated_chunk = "".join([part[0] for part in res_json[0] if part[0]])
-                translated_lines.append(translated_chunk.strip())
+            params = {"client": "gtx", "sl": "auto", "tl": "ru", "dt": "t", "q": line_str}
+            res = requests.get(url, params=params, timeout=5)
+            if res.status_code == 200:
+                translated.append("".join([part[0] for part in res.json()[0] if part[0]]).strip())
             else:
-                translated_lines.append(line_str)
+                translated.append(line_str)
         except:
-            translated_lines.append(line_str)
-            
-    return "\n".join(translated_lines)
+            translated.append(line_str)
+    return "\n".join(translated)
 
 def find_ingredients(text: str) -> List[Dict]:
-    """Автоматически извлекает ингредиенты и объемы из текста"""
     if not text:
         return []
-
     lines = text.split('\n')
     ingredients = []
     seen = set()
-
     exclude_words = {'минут', 'минуты', 'минута', 'второ', 'часо', 'час', 'градусо', 'градусов',
-                     'градусе', 'целью', 'цвет', 'время', 'температу', 'температур', 'процесс',
-                     'духов', 'духовк', 'разогреть', 'выпекать', 'оставить', 'смешать', 'взбить'}
-
+                     'процесс', 'духов', 'духовк', 'разогреть', 'выпекать', 'смешать', 'взбить'}
     units_map = {
-        'мл': 'мл', 'ml': 'мл', 'миллилитр': 'мл', 'миллилитров': 'мл', 'миллилитра': 'мл',
+        'мл': 'мл', 'ml': 'мл', 'миллилитр': 'мл', 'миллилитров': 'мл',
         'г': 'г', 'g': 'г', 'грамм': 'г', 'граммов': 'г', 'грамма': 'г',
-        'кг': 'кг', 'kg': 'кг', 'килограмм': 'кг', 'килограмма': 'кг',
-        'л': 'л', 'l': 'л', 'литр': 'л', 'литров': 'л', 'литра': 'л',
+        'кг': 'кг', 'kg': 'кг', 'килограмм': 'кг',
+        'л': 'л', 'l': 'л', 'литр': 'л', 'литров': 'л',
         'шт': 'шт', 'pcs': 'шт', 'штук': 'шт', 'штука': 'шт', 'штуки': 'шт',
-        'ст.л': 'ст.л', 'ст л': 'ст.л', 'tbsp': 'ст.л', 'столовая': 'ст.л', 'столовых': 'ст.л', 'столовые': 'ст.л', 'ложка': 'ст.л', 'ложки': 'ст.л',
-        'ч.л': 'ч.л', 'ч л': 'ч.л', 'tsp': 'ч.л', 'чайная': 'ч.л', 'чайных': 'ч.л', 'чайные': 'ч.л',
-        'зубчик': 'шт', 'зубчика': 'шт', 'зубчиков': 'шт', 'зуб.': 'шт'
+        'ст.л': 'ст.л', 'ст л': 'ст.л', 'tbsp': 'ст.л', 'столовая': 'ст.л', 'ложка': 'ст.л',
+        'ч.л': 'ч.л', 'ч л': 'ч.л', 'tsp': 'ч.л', 'чайная': 'ч.л'
     }
 
-    def add_ingredient(name: str, quantity: float, unit: str):
-        skip = False
-        for excl in exclude_words:
-            if excl in name.lower():
-                skip = True
-                break
-        if skip:
-            return
-
+    def add_ing(name: str, qty: float, unit: str):
+        if any(ex in name.lower() for ex in exclude_words): return
         name = re.sub(r'[,;.!?—()\[\]]', '', name).strip()
-        name = re.sub(r'^(хороший пучок|пучок|долька|дольки|зубчик|зубчика)\s+', '', name, flags=re.IGNORECASE)
-        
-        if len(name) < 2 or len(name) > 50:
-            return
-        if not any(c.isalpha() for c in name):
-            return
-
+        if len(name) < 2 or len(name) > 50 or not any(c.isalpha() for c in name): return
         key = f"{name}_{unit}"
-        if key not in seen and 0 < quantity < 10000:
-            ingredients.append({'name': name.lower(), 'quantity': quantity, 'unit': unit})
+        if key not in seen and 0 < qty < 10000:
+            ingredients.append({'name': name.lower(), 'quantity': qty, 'unit': unit})
             seen.add(key)
 
-    all_units_pattern = "|".join(sorted(units_map.keys(), key=len, reverse=True))
-
+    all_units = "|".join(sorted(units_map.keys(), key=len, reverse=True))
     for line in lines:
         line = line.strip()
-        if not line or len(line) < 3:
-            continue
-
-        if any(keyword in line.lower() for keyword in ['начинка', 'для теста', 'для сиропа', 'рецепт']):
-            continue
-
-        line = re.sub(r'(\d+(?:[.,]\d+)?)\s*[-—–]\s*(\d+(?:[.,]\d+))', r'\2', line)
+        if not line or len(line) < 3 or any(k in line.lower() for k in ['начинка', 'для теста', 'рецепт']): continue
+        line = re.sub(r'(\d+)\s*[-—–]\s*(\d+)', r'\2', line)
         line = re.sub(r'\(.*?\)', '', line).strip()
 
-        # Паттерн 1: Название....кол-во ед
-        match = re.search(rf'([а-яa-z\s\(\)]+?)\.{2,}\s*(\d+(?:[.,]\d+)?)\s*(?:{all_units_pattern})', line, re.IGNORECASE)
-        if match:
-            name = match.group(1).strip()
-            quantity_str = match.group(2).replace(',', '.')
+        m = re.search(rf'([а-яa-z\s]+?)\.{2,}\s*(\d+(?:[.,]\d+)?)\s*({all_units})', line, re.IGNORECASE)
+        if m:
             try:
-                quantity = float(quantity_str)
-                unit = 'шт'
-                for unit_key, unit_val in units_map.items():
-                    if unit_key.lower() in line.lower():
-                        unit = unit_val
-                        break
-                add_ingredient(name, quantity, unit)
+                add_ing(m.group(1), float(m.group(2).replace(',', '.')), units_map.get(m.group(3).lower(), 'шт'))
                 continue
-            except:
-                pass
-
-        # Паттерн 2: Название — кол-во ед
-        match = re.search(rf'([а-яa-z\s]+?)\s*[-—–:]\s*(\d+(?:[.,]\d+)?)\s*({all_units_pattern})', line, re.IGNORECASE)
-        if match:
-            name = match.group(1).strip()
-            quantity_str = match.group(2).replace(',', '.')
-            unit = match.group(3).lower()
+            except: pass
+        m = re.search(rf'([а-яa-z\s]+?)\s*[-—–:]\s*(\d+(?:[.,]\d+)?)\s*({all_units})', line, re.IGNORECASE)
+        if m:
             try:
-                quantity = float(quantity_str)
-                unit = units_map.get(unit, 'шт')
-                add_ingredient(name, quantity, unit)
+                add_ing(m.group(1), float(m.group(2).replace(',', '.')), units_map.get(m.group(3).lower(), 'шт'))
                 continue
-            except:
-                pass
-
-        # Паттерн 3: кол-во ед название
-        match = re.search(rf'(\d+(?:[.,]\d+)?)\s*({all_units_pattern})\s+([а-яa-z\s\(\)]+?)(?:[,;]|$)', line, re.IGNORECASE)
-        if match:
-            quantity_str = match.group(1).replace(',', '.')
-            unit = match.group(2).lower()
-            name = match.group(3).strip()
+            except: pass
+        m = re.search(rf'(\d+(?:[.,]\d+)?)\s*({all_units})\s+([а-яa-z\s]+?)', line, re.IGNORECASE)
+        if m:
             try:
-                quantity = float(quantity_str)
-                unit = units_map.get(unit, 'шт')
-                add_ingredient(name, quantity, unit)
+                add_ing(m.group(3), float(m.group(1).replace(',', '.')), units_map.get(m.group(2).lower(), 'шт'))
                 continue
-            except:
-                pass
-
-        # Паттерн 4 (для сайтов): Название кол-во ед
-        match = re.search(rf'([а-яa-z\s\(\)]+?)\s+(\d+(?:[.,]\d+)?)\s*({all_units_pattern})\b', line, re.IGNORECASE)
-        if match:
-            name = match.group(1).strip()
-            quantity_str = match.group(2).replace(',', '.')
-            unit = match.group(3).lower()
+            except: pass
+        m = re.search(rf'([а-яa-z\s]+?)\s+(\d+(?:[.,]\d+)?)\s*({all_units})\b', line, re.IGNORECASE)
+        if m:
             try:
-                quantity = float(quantity_str)
-                unit = units_map.get(unit, 'шт')
-                add_ingredient(name, quantity, unit)
+                add_ing(m.group(1), float(m.group(2).replace(',', '.')), units_map.get(m.group(3).lower(), 'шт'))
                 continue
-            except:
-                pass
-
+            except: pass
     return ingredients
 
 def calculate_ingredient_cost(name: str, qty: float, unit: str, prices: dict) -> tuple[float, str]:
-    """Интеллектуальный расчет стоимости с поддержкой синонимов и конверсий ШТ в КГ"""
     name_clean = name.lower().strip()
-    
     SYNONYMS = {
-        'кабачки': 'цуккини',
-        'кабачок': 'цуккини',
-        'яйца': 'куриное яйцо',
-        'яйцо': 'куриное яйцо',
-        'оливковое масло': 'масло растительное',
-        'растительное масло': 'масло растительное',
-        'подсолнечное масло': 'масло подсолнечное',
-        'соевый соус': 'соус соевый',
-        'горчица в зернах': 'горчица',
-        'лимонный сок': 'лимон желтый',
-        'белокочанная капуста': 'белокочанная капуста',
-        'капуста': 'белокочанная капуста'
+        'кабачки': 'цуккини', 'кабачок': 'цуккини', 'яйца': 'куриное яйцо', 'яйцо': 'куриное яйцо',
+        'оливковое масло': 'масло растительное', 'растительное масло': 'масло растительное',
+        'подсолнечное масло': 'масло растительное', 'соевый соус': 'соус соевый',
+        'лимонный сок': 'лимон желтый', 'капуста': 'белокочанная капуста', 'картошка': 'картофель'
     }
-    
-    for syn_k, syn_v in SYNONYMS.items():
-        if syn_k in name_clean:
-            name_clean = syn_v
-            break
-            
+    if name_clean in SYNONYMS:
+        name_clean = SYNONYMS[name_clean]
     p_data = prices.get(name_clean)
-    
     if not p_data:
         for k, v in prices.items():
             if k in name_clean or name_clean in k:
                 p_data = v
-                name_clean = k
                 break
-                
-    if not p_data:
-        return 0.0, "Нет цены в базе"
-        
-    p_price = p_data['price']
-    p_unit = p_data['unit'].lower().strip()
-    u_rec = unit.lower().strip()
+    if not p_data: return 0.0, "Нет цены в базе"
     
-    if u_rec == p_unit:
-        return qty * p_price, ""
-        
+    p_price, p_unit = p_data['price'], p_data['unit'].lower().strip()
+    u_rec = unit.lower().strip()
+    if u_rec == p_unit: return qty * p_price, ""
+    
     if u_rec == 'шт' and p_unit in ['кг', 'kg']:
-        AVG_WEIGHTS = {
-            'помидоры': 0.12,
-            'цуккини': 0.30,
-            'лук репчатый': 0.10,
-            'красный лук': 0.10,
-            'чеснок': 0.01,
-            'лимон желтый': 0.12,
-            'куриное яйцо': 1.0
-        }
-        
-        avg_weight = 0.10
-        for w_k, w_v in AVG_WEIGHTS.items():
-            if w_k in name_clean:
-                avg_weight = w_v
-                break
-                
-        if avg_weight == 1.0:
-            return qty * p_price, ""
-            
-        weight_in_kg = qty * avg_weight
-        return weight_in_kg * p_price, f" (перевод из шт в кг: ~{avg_weight*1000:.0f}г/шт)"
-        
-    if p_unit in ['кг', 'kg']:
-        if u_rec in ['г', 'g', 'грамм', 'граммов', 'грамма']:
-            return (qty / 1000.0) * p_price, ""
-        elif u_rec in ['ч.л', 'ч л']:
-            return (qty * 5.0 / 1000.0) * p_price, " (расчет как ~5г)"
-        elif u_rec in ['ст.л', 'ст л']:
-            return (qty * 15.0 / 1000.0) * p_price, " (расчет как ~15г)"
-            
-    if p_unit in ['л', 'l', 'литр']:
-        if u_rec in ['мл', 'ml', 'миллилитр']:
-            return (qty / 1000.0) * p_price, ""
-        elif u_rec in ['ч.л', 'ч л']:
-            return (qty * 5.0 / 1000.0) * p_price, " (расчет как ~5мл)"
-        elif u_rec in ['ст.л', 'ст л']:
-            return (qty * 15.0 / 1000.0) * p_price, " (расчет как ~15мл)"
-            
+        weights = {'помидоры': 0.12, 'цуккини': 0.30, 'лук репчатый': 0.10, 'чеснок': 0.01, 'куриное яйцо': 1.0}
+        w = weights.get(name_clean, 0.10)
+        if w == 1.0: return qty * p_price, ""
+        return qty * w * p_price, f" (из шт в кг: ~{w*1000:.0f}г/шт)"
+    if p_unit in ['кг', 'kg'] and u_rec in ['г', 'g', 'грамм', 'граммов']:
+        return (qty / 1000.0) * p_price, ""
+    if p_unit in ['кг', 'kg'] and u_rec in ['ч.л', 'ч л']:
+        return (qty * 5.0 / 1000.0) * p_price, " (расчет как ~5г)"
+    if p_unit in ['кг', 'kg'] and u_rec in ['ст.л', 'ст л']:
+        return (qty * 15.0 / 1000.0) * p_price, " (расчет как ~15г)"
+    if p_unit in ['л', 'l'] and u_rec in ['мл', 'ml']:
+        return (qty / 1000.0) * p_price, ""
     return 0.0, f"Несоответствие ед. ({u_rec} vs {p_unit})"
 
 init_db()
 CATEGORIES = ["Супы", "Вторые блюда", "Десерты и выпечка", "Консервация", "Колбасы", "Напитки", "Разное"]
-
 tab1, tab2, tab3 = st.tabs(["📺 Загрузка", "📋 Рецепты", "💰 Цены"])
 
 with tab1:
     st.subheader("Загрузка рецепта")
-    input_mode = st.radio("Источник рецепта:", ["YouTube видео", "Ссылка на страницу"], horizontal=True)
-
+    input_mode = st.radio("Источник:", ["YouTube видео", "Ссылка на страницу"], horizontal=True)
     if input_mode == "YouTube видео":
         video_url = st.text_input("YouTube ссылка:", placeholder="https://youtube.com/watch?v=...")
         if st.button("🔄 Загрузить", type="primary", use_container_width=True):
-            if not video_url.strip():
-                st.error("❌ Введите ссылку")
-            else:
-                with st.spinner("⏳ Загружаю, очищаю и перевожу описание видео..."):
+            if video_url.strip():
+                with st.spinner("⏳ Обработка видео..."):
                     data = get_youtube_data(video_url)
-
-                if data.get('error'):
-                    st.error(f"❌ Ошибка: {data['error']}")
+                if data.get('error'): st.error(f"❌ Ошибка: {data['error']}")
                 else:
-                    translated_description = translate_text(data['description'])
-                    translated_title = translate_text(data['title'])
-                    
-                    st.success("✅ Описание успешно переведено и очищено!")
-                    ingredients = find_ingredients(translated_description)
-
-                    st.session_state.ingredients = ingredients
-                    st.session_state.recipe_description = translated_description
+                    trans_desc = translate_text(data['description'])
+                    st.session_state.ingredients = find_ingredients(trans_desc)
+                    st.session_state.recipe_description = trans_desc
                     st.session_state.video_url = video_url
-                    st.session_state.video_title = translated_title
-                    
-                    if not ingredients:
-                        st.warning("⚠️ Список ингредиентов автоматически не определен. Вы сможете настроить его в текстовом поле.")
-
+                    st.session_state.video_title = translate_text(data['title'])
+                    st.success("✅ Описание готово!")
     else:
-        page_url = st.text_input("Ссылка на страницу:", placeholder="https://example.com/recipe...")
+        page_url = st.text_input("Ссылка на страницу:", placeholder="https://food.ru/recipes/...")
         if st.button("🔄 Загрузить", type="primary", use_container_width=True):
-            if not page_url.strip():
-                st.error("❌ Введите ссылку")
-            else:
-                with st.spinner("⏳ Загружаю и фильтрую страницу..."):
+            if page_url.strip():
+                with st.spinner("⏳ Анализ страницы..."):
                     page_text = get_page_text(page_url)
-
-                if page_text and len(page_text) > 100:
-                    translated_page = translate_text(page_text)
-                    st.success("✅ Страница загружена!")
-                    ingredients = find_ingredients(translated_page)
-                    
-                    st.session_state.ingredients = ingredients
-                    st.session_state.recipe_description = translated_page
+                if page_text:
+                    trans_page = translate_text(page_text)
+                    st.session_state.ingredients = find_ingredients(trans_page)
+                    st.session_state.recipe_description = trans_page
                     st.session_state.video_url = page_url
                     st.session_state.video_title = "Рецепт со страницы"
-                else:
-                    st.error("❌ Не удалось загрузить страницу или извлечь чистый текст рецепта")
+                    st.success("✅ Страница обработана!")
+                else: st.error("❌ Не удалось загрузить страницу")
 
     if 'recipe_description' in st.session_state:
         st.divider()
         col_ing, col_desc = st.columns([1, 2])
-        
         with col_ing:
             st.subheader("🥘 Компоненты:")
             if st.session_state.ingredients:
                 for ing in st.session_state.ingredients:
                     st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']}")
-            else:
-                st.info("Компоненты пустые — добавьте их при необходимости в текст инструкции.")
-        
+            else: st.info("Компоненты пустые — настройте их вручную.")
         with col_desc:
-            st.subheader("📝 Процесс приготовления:")
-            edited_description = st.text_area(
-                "Текст рецепта (на русском, без лишнего мусора):", 
-                value=st.session_state.recipe_description, 
-                height=300
-            )
-
+            st.subheader("📝 Инструкция:")
+            edited_description = st.text_area("Текст процесса:", value=st.session_state.recipe_description, height=300)
         st.divider()
-        st.subheader("💾 Сохранить рецепт")
-        default_name = st.session_state.get('video_title', '')
-        recipe_name = st.text_input("Название рецепта:", value=default_name)
+        recipe_name = st.text_input("Название рецепта:", value=st.session_state.get('video_title', ''))
         category = st.selectbox("Категория:", CATEGORIES)
-        
-        if st.button("💾 Подтвердить и сохранить", type="primary", use_container_width=True):
-            if not recipe_name.strip():
-                st.error("❌ Введите название рецепта")
-            else:
-                v_url = st.session_state.get('video_url')
-                save_recipe(recipe_name, category, st.session_state.ingredients, edited_description, v_url)
-                st.success(f"✅ Рецепт '{recipe_name}' сохранен!")
-                
+        if st.button("💾 Подтвердить и сохранить рецепт", type="primary", use_container_width=True):
+            if recipe_name.strip():
+                save_recipe(recipe_name, category, st.session_state.ingredients, edited_description, st.session_state.get('video_url'))
+                st.success("✅ Рецепт успешно сохранен!")
                 del st.session_state.ingredients
                 del st.session_state.recipe_description
                 st.rerun()
 
 with tab2:
-    st.subheader("📋 Сохраненные рецепты")
-    filter_category = st.selectbox("Фильтр по категории:", ["Все"] + CATEGORIES)
-    if filter_category == "Все":
-        recipes = get_recipes()
-    else:
-        recipes = get_recipes(filter_category)
-
+    st.subheader("📋 База рецептов")
+    filter_category = st.selectbox("Категория:", ["Все"] + CATEGORIES)
+    recipes = get_recipes(None if filter_category == "Все" else filter_category)
     system_prices = get_prices()
-
     if recipes:
         for recipe in recipes:
             with st.expander(f"📄 {recipe['name']} ({recipe['category']})"):
-                st.write(f"**Дата добавления:** {recipe['created_at']}")
-                if recipe['video_url']:
-                    st.write(f"**Источник:** [Открыть ссылку]({recipe['video_url']})")
-                
+                if recipe['video_url']: st.write(r"**Источник:** [Открыть ссылку](%s)" % recipe['video_url'])
+                portions = st.number_input("Количество порций:", min_value=1, value=1, key=f"p_{recipe['id']}")
                 st.divider()
-                portions = st.number_input(
-                    "Укажите количество порций для расчета себестоимости:", 
-                    min_value=1, value=1, step=1, key=f"portions_{recipe['id']}"
-                )
-                
-                st.divider()
-                view_col1, view_col2 = st.columns([1, 2])
-                
-                total_recipe_cost = 0.0
-                
-                with view_col1:
+                v1, v2 = st.columns([1, 2])
+                total_cost = 0.0
+                with v1:
                     st.markdown("**Ингредиенты и стоимость:**")
                     for ing in recipe['ingredients']:
-                        cost, warning = calculate_ingredient_cost(ing['name'], ing['quantity'], ing['unit'], system_prices)
-                        total_recipe_cost += cost
-                        
-                        if warning == "Нет цены в базе":
-                            st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']} — <span style='color:gray;'>*{warning}*</span>", unsafe_allow_html=True)
-                        elif "Несоответствие" in warning:
-                            st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']} — <span style='color:orange;'>*{warning}*</span>", unsafe_allow_html=True)
+                        cost, warn = calculate_ingredient_cost(ing['name'], ing['quantity'], ing['unit'], system_prices)
+                        total_cost += cost
+                        if warn == "Нет цены в базе":
+                            st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']} — <span style='color:gray;'>*{warn}*</span>", unsafe_allow_html=True)
+                        elif "Несоответствие" in warn:
+                            st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']} — <span style='color:orange;'>*{warn}*</span>", unsafe_allow_html=True)
                         else:
-                            st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']} — **${cost:.2f}** <span style='font-size:11px; color:green;'>{warning}</span>", unsafe_allow_html=True)
-                    
+                            st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']} — **${cost:.2f}** <span style='color:green; font-size:11px;'>{warn}</span>", unsafe_allow_html=True)
                     st.divider()
-                    st.metric(label="💰 Себестоимость всего замеса:", value=f"${total_recipe_cost:.2f}")
-                    if portions > 1:
-                        st.metric(label="🍽️ Себестоимость 1 порции:", value=f"${(total_recipe_cost / portions):.2f}")
-                
-                with view_col2:
-                    st.markdown("**Инструкция по приготовлению:**")
-                    if recipe['description']:
-                        st.write(recipe['description'])
-                    else:
-                        st.caption("Описание процесса отсутствует.")
-                
+                    st.metric("💰 Стоимость замеса:", f"${total_cost:.2f}")
+                    if portions > 1: st.metric("🍽️ Себестоимость 1 порции:", f"${(total_cost / portions):.2f}")
+                with v2:
+                    st.markdown("**Процесс приготовления:**")
+                    st.write(recipe['description'] if recipe['description'] else "Описание отсутствует.")
                 st.divider()
-                if st.button("🗑️ Удалить рецепт", key=f"delete_{recipe['id']}", use_container_width=True):
+                if st.button("🗑️ Удалить рецепт", key=f"del_{recipe['id']}", use_container_width=True):
                     delete_recipe(recipe['id'])
-                    st.success("✅ Рецепт удален")
                     st.rerun()
-    else:
-        st.info("📌 Рецептов нет.")
+    else: st.info("📌 Рецептов пока нет.")
 
 with tab3:
     st.subheader("💰 Управление ценами")
-    st.write("**Загрузить прайс-лист:**")
-    uploaded_file = st.file_uploader("Выберите текстовый файл с ценами (.txt, .csv)", type=["txt", "csv"])
-
+    uploaded_file = st.file_uploader("Загрузить прайс-лист (.txt, .csv):", type=["txt", "csv"])
     if uploaded_file:
         try:
             content = uploaded_file.read().decode('utf-8')
-            lines = content.strip().split('\n')
             prices = {}
-            for line in lines:
-                if '\t' in line:
-                    parts = line.split('\t')
-                elif ',' in line:
-                    parts = line.split(',')
-                else:
-                    continue
+            for line in content.strip().split('\n'):
+                parts = line.split('\t') if '\t' in line else line.split(',')
                 if len(parts) >= 3:
-                    ingredient = parts[0].strip()
                     try:
-                        price = float(parts[1].strip())
-                        unit = parts[2].strip()
-                        prices[ingredient] = {'price': price, 'unit': unit}
-                    except:
-                        continue
-
+                        prices[parts[0].strip()] = {'price': float(parts[1].strip()), 'unit': parts[2].strip()}
+                    except: continue
             if prices:
                 st.success(f"✅ Найдено {len(prices)} позиций")
-                if st.button("💾 Сохранить цены", type="primary", use_container_width=True):
+                if st.button("💾 Записать цены в базу", type="primary", use_container_width=True):
                     save_prices(prices)
                     st.success("✅ Цены сохранены!")
-                df = pd.DataFrame([
-                    {'Ингредиент': k, 'Цена': v['price'], 'Единица': v['unit']}
-                    for k, v in prices.items()
-                ])
-                st.dataframe(df, use_container_width=True)
-            else:
-                st.error("❌ Не удалось распознать формат файла")
-        except Exception as e:
-            st.error(f"❌ Ошибка при загрузке: {e}")
-
+                st.dataframe(pd.DataFrame([{'Ингредиент': k, 'Цена': v['price'], 'Единица': v['unit']} for k, v in prices.items()]), use_container_width=True)
+        except Exception as e: st.error(f"❌ Ошибка: {e}")
     st.divider()
-    st.write("**Текущие цены в системе:**")
+    st.write("**Текущие цены:**")
     current_prices = get_prices()
     if current_prices:
-        df = pd.DataFrame([
-            {'Ингредиент': k, 'Цена': v['price'], 'Единица': v['unit']}
-            for k, v in current_prices.items()
-        ])
-        st.dataframe(df, use_container_width=True)
-        st.write("**Добавить/изменить цену вручную:**")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            ing_name = st.text_input("Ингредиент:", placeholder="Например: молоко")
-        with col2:
-            ing_price = st.number_input("Цена:", min_value=0.0, step=10.0)
-        with col3:
-            ing_unit = st.selectbox("Единица:", ["г", "мл", "шт", "л", "кг"])
-        if st.button("➕ Добавить цену", use_container_width=True):
-            if ing_name.strip():
-                save_prices({ing_name: {'price': ing_price, 'unit': ing_unit}})
-                st.success(f"✅ Цена для '{ing_name}' добавлена!")
+        st.dataframe(pd.DataFrame([{'Ингредиент': k, 'Цена': v['price'], 'Единица': v['unit']} for k, v in current_prices.items()]), use_container_width=True)
+        st.write("**Добавить цену вручную:**")
+        c1, c2, c3 = st.columns(3)
+        with c1: man_name = st.text_input("Ингредиент:", placeholder="Например: мука пшеничная")
+        with c2: man_price = st.number_input("Цена ($):", min_value=0.0, step=0.1)
+        with c3: man_unit = st.selectbox("Единица:", ["кг", "г", "л", "мл", "шт"])
+        if st.button("➕ Добавить позицию", use_container_width=True):
+            if man_name.strip():
+                save_prices({man_name: {'price': man_price, 'unit': man_unit}})
                 st.rerun()
-    else:
-        st.info("📌 Цены не загружены.")
+    else: st.info("📌 База цен пуста.")
+      
