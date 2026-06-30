@@ -179,20 +179,90 @@ def get_youtube_data(video_url: str) -> Dict:
         }
 
 def get_page_text(url: str) -> Optional[str]:
-    """Парсит и очищает текст со страницы сайта"""
+    """Парсит и очищает текст со страницы сайта, извлекая только чистый контент рецепта"""
     try:
         import requests
         from bs4 import BeautifulSoup
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        import json
+        
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
         response = requests.get(url, headers=headers, timeout=10)
         response.encoding = 'utf-8'
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            for script in soup(['script', 'style']):
-                script.decompose()
-            text = soup.get_text('\n')
-            return clean_description(text)
-        return None
+        if response.status_code != 200:
+            return None
+            
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # --- СТРАТЕГИЯ 1: Извлечение через JSON-LD (микроразметка Schema.org Recipe) ---
+        scripts = soup.find_all('script', type='application/ld+json')
+        for script in scripts:
+            try:
+                if not script.string:
+                    continue
+                data = json.loads(script.string)
+                
+                recipes = []
+                def search_recipe(obj):
+                    if isinstance(obj, dict):
+                        if obj.get('@type') == 'Recipe' or (isinstance(obj.get('@type'), list) and 'Recipe' in obj.get('@type')):
+                            recipes.append(obj)
+                        for v in obj.values():
+                            search_recipe(v)
+                    elif isinstance(obj, list):
+                        for item in obj:
+                            search_recipe(item)
+                            
+                search_recipe(data)
+                
+                if recipes:
+                    recipe = recipes[0]
+                    clean_lines = []
+                    
+                    # Собираем ингредиенты для распознавания парсером компонентов
+                    ing_list = recipe.get('recipeIngredient', [])
+                    if ing_list:
+                        for ing in ing_list:
+                            if isinstance(ing, str):
+                                clean_lines.append(ing.strip())
+                        clean_lines.append("") # Отступ
+                        
+                    # Собираем шаги приготовления
+                    instructions_raw = recipe.get('recipeInstructions', [])
+                    if instructions_raw:
+                        steps = []
+                        if isinstance(instructions_raw, list):
+                            for step in instructions_raw:
+                                if isinstance(step, dict):
+                                    steps.append(step.get('text', step.get('name', '')))
+                                elif isinstance(step, str):
+                                    steps.append(step)
+                        elif isinstance(instructions_raw, str):
+                            steps.append(instructions_raw)
+                            
+                        for idx, step_text in enumerate(steps, 1):
+                            if step_text:
+                                # Очищаем текст шага от возможных внутренних HTML тегов
+                                step_pure = BeautifulSoup(step_text, "html.parser").get_text()
+                                clean_lines.append(f"Шаг {idx}. {step_pure.strip()}")
+                                
+                    combined_text = "\n".join(clean_lines).strip()
+                    if len(combined_text) > 50:
+                        return clean_description(combined_text)
+            except:
+                continue
+                
+        # --- СТРАТЕГИЯ 2: Фаллбэк (Если микроразметки нет, жестко чистим структуру HTML) ---
+        for trash_tag in ['script', 'style', 'nav', 'header', 'footer', 'aside', 'form', 'noscript', 'button', 'svg']:
+            for element in soup.find_all(trash_tag):
+                element.decompose()
+                
+        for selector in ['.header', '.footer', '.menu', '.sidebar', '.nav', '.breadcrumbs', '.comments', '.banner', '.sharing']:
+            for element in soup.select(selector):
+                element.decompose()
+                
+        text = soup.get_text('\n')
+        return clean_description(text)
+        
     except Exception as e:
         return None
 
@@ -359,7 +429,7 @@ with tab1:
                     translated_description = translate_text(data['description'])
                     translated_title = translate_text(data['title'])
                     
-                    st.success("✅ Описание успешно переведено и очищено!)")
+                    st.success("✅ Описание успешно переведено и очищено!")
                     
                     ingredients = find_ingredients(translated_description)
 
@@ -377,12 +447,12 @@ with tab1:
             if not page_url.strip():
                 st.error("❌ Введите ссылку")
             else:
-                with st.spinner("⏳ Загружаю страницу..."):
+                with st.spinner("⏳ Загружаю и фильтрую страницу..."):
                     page_text = get_page_text(page_url)
 
                 if page_text and len(page_text) > 100:
                     translated_page = translate_text(page_text)
-                    st.success("✅ Страница загружена и переведена!")
+                    st.success("✅ Страница загружена и очищена от навигационного мусора!")
                     ingredients = find_ingredients(translated_page)
                     
                     st.session_state.ingredients = ingredients
@@ -390,7 +460,7 @@ with tab1:
                     st.session_state.video_url = page_url
                     st.session_state.video_title = "Рецепт со страницы"
                 else:
-                    st.error("❌ Не удалось загрузить страницу")
+                    st.error("❌ Не удалось загрузить страницу или извлечь чистый текст рецепта")
 
     if 'recipe_description' in st.session_state:
         st.divider()
