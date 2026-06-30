@@ -12,7 +12,6 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 
-# 🔧 Логирование ошибок
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -20,8 +19,7 @@ st.set_page_config(page_title="🍳 Кулинарный калькулятор 
 st.title("🍳 Кулинарный калькулятор (PRO)")
 st.markdown("Управление рецептами, ингредиентами и расчет себестоимости")
 
-# 🔧 Ограничение размера файла
-MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
+MAX_FILE_SIZE = 5 * 1024 * 1024
 
 def init_db():
     conn = sqlite3.connect('recipes.db')
@@ -48,9 +46,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-# 🔧 Валидация данных
 def is_safe_string(text: str, max_len: int = 500) -> bool:
-    """Проверить строку на опасный контент"""
     if not text or len(text) > max_len:
         return False
     if re.search(r"(?i)(DROP|DELETE|INSERT|UPDATE|SELECT)\s", text):
@@ -58,11 +54,9 @@ def is_safe_string(text: str, max_len: int = 500) -> bool:
     return True
 
 def save_recipe(name: str, category: str, ingredients: List[Dict], description: str, video_url: Optional[str] = None):
-    """Сохранить рецепт с валидацией"""
     if not is_safe_string(name, 200) or not is_safe_string(description, 10000):
         st.error("❌ Опасные или слишком длинные данные")
         return False
-
     conn = sqlite3.connect('recipes.db')
     c = conn.cursor()
     ingredients_json = json.dumps(ingredients)
@@ -80,16 +74,13 @@ def save_recipe(name: str, category: str, ingredients: List[Dict], description: 
 def update_recipe_full(recipe_id: int, new_name: str, new_ingredients: List[Dict], new_description: str):
     conn = sqlite3.connect('recipes.db')
     c = conn.cursor()
-
     if not is_safe_string(new_name, 200) or not is_safe_string(new_description, 10000):
         st.error("❌ Опасные или слишком длинные данные")
         return False
-
     ingredients_json = json.dumps(new_ingredients)
     try:
-        c.execute('''UPDATE recipes
-                     SET name = ?, ingredients = ?, description = ?
-                     WHERE id = ?''', (new_name, ingredients_json, new_description, recipe_id))
+        c.execute('''UPDATE recipes SET name = ?, ingredients = ?, description = ? WHERE id = ?''',
+                  (new_name, ingredients_json, new_description, recipe_id))
         conn.commit()
         return True
     except Exception as e:
@@ -157,7 +148,6 @@ def get_prices() -> Dict[str, Dict]:
     return prices
 
 def get_requests_session():
-    """Создать session requests с встроенной retry логикой"""
     session = requests.Session()
     retry_strategy = Retry(
         total=3,
@@ -171,40 +161,26 @@ def get_requests_session():
     return session
 
 def validate_parsed_content(text: str) -> bool:
-    """Валидация что текст содержит хотя бы минимум полезного контента"""
     if not text or len(text) < 100:
         return False
-
-    # Проверка наличия хотя бы одного слова (кириллица или латиница)
     has_words = bool(re.search(r'[А-Яа-яA-Za-z]{3,}', text))
     if not has_words:
         return False
-
-    # Проверка что это не просто иероглифы или мусор
     cyrillic_count = len(re.findall(r'[А-Яа-яЁё]', text))
     latin_count = len(re.findall(r'[A-Za-z]', text))
-
-    # Если всего букв менее 20, это вероятно мусор
     if cyrillic_count + latin_count < 20:
         return False
-
     return True
 
 def clean_description(text: str) -> str:
-    """Очистить описание от комментариев, тегов, ссылок и рекламы (НО НЕ инструкции!)"""
     if not text:
         return ""
-
-    # Удаление HTML тегов и сущностей
     text = re.sub(r'<[^>]+>', '', text)
     text = re.sub(r'&[a-z]+;', '', text)
-
-    # Удаление ссылок и номеров карт
     text = re.sub(r'https?://[^\s]+', '', text)
     text = re.sub(r'www\.[^\s]+', '', text)
     text = re.sub(r'\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b', '', text)
 
-    # Ключевые слова РЕЦЕПТА/ИНСТРУКЦИЙ (НЕ трогать эти строки!)
     recipe_words = [
         'шаг', 'добавить', 'смешать', 'варить', 'жарить', 'пекать', 'готовить', 'положить',
         'залить', 'посыпать', 'украсить', 'перемешать', 'поставить', 'выпечь', 'включить',
@@ -213,10 +189,6 @@ def clean_description(text: str) -> str:
         'тесто', 'соус', 'глазурь', 'крем', 'начинка', 'начин', 'фарш', 'маринад'
     ]
 
-    lines = text.split('\n')
-    filtered_lines = []
-
-    # Ключевые слова РЕКЛАМЫ (удалять эти строки)
     ad_keywords = [
         'telegram', 'tg.me', 'монобанк', 'промокод', 'скидка', 'подпишись', 'subscribe',
         'instagram', 'инстаграм', 'vk.com', 'вконтакте', 'facebook', 'patreon', 'paypal',
@@ -229,56 +201,36 @@ def clean_description(text: str) -> str:
         'спасибо за внимание', 'до свидания', 'пока', 'всем пока', 'привет всем'
     ]
 
+    lines = text.split('\n')
+    filtered_lines = []
     for line in lines:
         line_strip = line.strip()
         if not line_strip:
             continue
-
-        # СНАЧАЛА проверяем - это инструкция (содержит recipe_words)?
         is_recipe_line = any(keyword in line_strip.lower() for keyword in recipe_words)
-
         if is_recipe_line:
-            # Если это инструкция - ОСТАВЛЯЕМ её (не удаляем)
             filtered_lines.append(line_strip)
             continue
-
-        # Удаляем строки с рекламой
         if any(keyword in line_strip.lower() for keyword in ad_keywords):
             continue
-
-        # Удаляем строки только с цифрами, смайлами и датами (это комментарии)
         if re.match(r'^[\d\s:,\.\-/😊😍❤️👍💯🔥😋🤩🎉]+$', line_strip):
             continue
-
-        # Удаляем очень короткие строки, которые похоже имена авторов (но не инструкции!)
-        # Это должны быть короткие строки только с буквами
         if len(line_strip) < 25 and re.match(r'^[А-Яа-яA-Za-z\s]+$', line_strip) and ' ' in line_strip:
-            # Двойная проверка - это не инструкция?
             if not any(word in line_strip.lower() for word in recipe_words):
                 continue
-
-        # Удаляем хештеги-только строки
         if re.match(r'^[#@][^\s]*(\s[#@][^\s]*)*$', line_strip):
             continue
-
         filtered_lines.append(line_strip)
 
     text = '\n'.join(filtered_lines)
-
-    # Удаление хештегов
     text = re.sub(r'#[\w]+', '', text, flags=re.UNICODE | re.IGNORECASE)
-
-    # Очистка лишних пустых строк
     text = re.sub(r'\n{2,}', '\n', text)
-
     return text.strip()
 
 def get_page_text_fallback(url: str) -> Optional[str]:
-    """Fallback парсинг без Selenium (используется как основной способ на Streamlit Cloud)"""
     max_retries = 3
-    timeout = 40  # Увеличено с 20 до 40 сек
+    timeout = 40
     session = get_requests_session()
-
     for attempt in range(max_retries):
         try:
             headers = {
@@ -290,48 +242,30 @@ def get_page_text_fallback(url: str) -> Optional[str]:
             }
             logger.info(f"Попытка #{attempt + 1}/{max_retries} загрузить {url}")
             response = session.get(url, headers=headers, timeout=timeout, allow_redirects=True)
-
             if response.status_code != 200:
                 logger.warning(f"Статус {response.status_code}, повторяем...")
                 if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt  # Exponential backoff: 1, 2, 4 сек
+                    wait_time = 2 ** attempt
                     logger.info(f"Ожидание {wait_time} сек перед повтором...")
                     time.sleep(wait_time)
                 continue
 
-            # ===== УЛУЧШЕННАЯ ОБРАБОТКА КОДИРОВКИ =====
-            # Определяем список кодировок для попытки (сначала указанная сервером)
             encodings_to_try = []
-
             if response.encoding and response.encoding.lower() not in ['none', 'utf-8']:
                 encodings_to_try.append(response.encoding)
-
-            # Основные кодировки для русских сайтов
             encodings_to_try.extend(['utf-8', 'windows-1251', 'iso-8859-5', 'cp1251', 'cp866'])
-
-            # Удаляем дубликаты
             encodings_to_try = list(dict.fromkeys(encodings_to_try))
 
             soup = None
             used_encoding = None
-
-            # Пробуем каждую кодировку на raw bytes
             for encoding in encodings_to_try:
                 try:
-                    # Парсим raw bytes с явно указанной кодировкой
                     text_decoded = response.content.decode(encoding)
                     soup = BeautifulSoup(text_decoded, 'html.parser')
-
-                    # Проверяем что текст не иероглифы/мусор
-                    # Берем небольшой sample для проверки
                     text_sample = soup.get_text()[:1000]
-
-                    # Проверяем наличие букв
                     cyrillic_match = re.findall(r'[А-Яа-яЁё]', text_sample)
                     latin_match = re.findall(r'[A-Za-z]', text_sample)
-
                     if len(cyrillic_match) + len(latin_match) > 10:
-                        # Достаточно букв, эта кодировка подходит
                         used_encoding = encoding
                         logger.info(f"✓ Кодировка {encoding} выбрана (букв найдено: {len(cyrillic_match)} кирилл, {len(latin_match)} латин)")
                         break
@@ -339,7 +273,6 @@ def get_page_text_fallback(url: str) -> Optional[str]:
                         logger.debug(f"Кодировка {encoding}: мало букв ({len(cyrillic_match)} + {len(latin_match)})")
                         soup = None
                         continue
-
                 except (UnicodeDecodeError, LookupError) as e:
                     logger.debug(f"Кодировка {encoding} не подошла: {e}")
                     soup = None
@@ -360,10 +293,7 @@ def get_page_text_fallback(url: str) -> Optional[str]:
                         time.sleep(2 ** attempt)
                     continue
 
-            # ===== ПАРСИНГ СОДЕРЖИМОГО =====
             logger.info(f"Используется кодировка: {used_encoding}")
-
-            # 1. СНАЧАЛА пытаемся найти schema.org Recipe JSON (самый чистый способ)
             scripts = soup.find_all('script', type='application/ld+json')
             for script in scripts:
                 try:
@@ -371,7 +301,6 @@ def get_page_text_fallback(url: str) -> Optional[str]:
                         continue
                     data = json.loads(script.string)
                     recipes = []
-
                     def search_recipe(obj):
                         if isinstance(obj, dict):
                             if obj.get('@type') == 'Recipe' or (isinstance(obj.get('@type'), list) and 'Recipe' in obj.get('@type')):
@@ -381,22 +310,16 @@ def get_page_text_fallback(url: str) -> Optional[str]:
                         elif isinstance(obj, list):
                             for item in obj:
                                 search_recipe(item)
-
                     search_recipe(data)
-
                     if recipes:
                         recipe = recipes[0]
                         clean_lines = []
-
-                        # Ингредиенты
                         ing_list = recipe.get('recipeIngredient', [])
                         if ing_list:
                             for ing in ing_list:
                                 if isinstance(ing, str):
                                     clean_lines.append(ing.strip())
                             clean_lines.append("")
-
-                        # Инструкции
                         instructions_raw = recipe.get('recipeInstructions', [])
                         if instructions_raw:
                             raw_steps = []
@@ -408,12 +331,10 @@ def get_page_text_fallback(url: str) -> Optional[str]:
                                         raw_steps.append(step)
                             elif isinstance(instructions_raw, str):
                                 raw_steps.append(instructions_raw)
-
                             for idx, step_text in enumerate(raw_steps, 1):
                                 if step_text:
                                     step_pure = BeautifulSoup(step_text, 'html.parser').get_text().strip()
                                     clean_lines.append(f"Шаг {idx}. {step_pure}")
-
                         combined = "\n".join(clean_lines).strip()
                         if validate_parsed_content(combined):
                             logger.info("✓ Рецепт найден в schema.org JSON")
@@ -424,20 +345,15 @@ def get_page_text_fallback(url: str) -> Optional[str]:
                     logger.debug(f"Ошибка парсинга schema.org: {e}")
                     continue
 
-            # 2. Если schema.org не нашли, очищаем страницу от мусора
-            # Удаление ненужных элементов
             for tag in ['script', 'style', 'nav', 'header', 'footer', 'aside', 'form', 'noscript', 'button', 'svg', 'iframe']:
                 for element in soup.find_all(tag):
                     element.decompose()
 
-            # Удаление элементов по классам и ID (мусор, комментарии, авторы)
             for selector in ['.header', '.footer', '.menu', '.sidebar', '.nav', '.breadcrumbs', '.comments', '.banner', '.sharing', '.ads', '.advertisement', '.related', '.recommend', '.author-info', '.user-comments', '.review', '.rating', '#comments', '#reviews', '.sidebar-ads']:
                 for element in soup.select(selector):
                     element.decompose()
 
-            # Поиск основного контента - обычно в article, main, или div с рецептом
             main_content = soup.find('article') or soup.find('main') or soup.find('div', class_=re.compile(r'recipe|content|post', re.I)) or soup.body
-
             if main_content:
                 text = main_content.get_text('\n')
             else:
@@ -445,12 +361,9 @@ def get_page_text_fallback(url: str) -> Optional[str]:
 
             lines = [line.strip() for line in text.splitlines() if line.strip()]
             result = clean_description('\n'.join(lines))
-
-            # Ограничиваем размер результата (максимум 5000 символов)
             if len(result) > 5000:
                 result = result[:5000]
 
-            # Валидируем результат перед возвратом
             if validate_parsed_content(result):
                 logger.info("✓ Рецепт загружен через fallback парсинг")
                 return result
@@ -459,7 +372,6 @@ def get_page_text_fallback(url: str) -> Optional[str]:
                 if attempt < max_retries - 1:
                     time.sleep(2 ** attempt)
                 continue
-
         except (requests.exceptions.Timeout, requests.exceptions.ConnectTimeout) as e:
             logger.warning(f"Таймаут #{attempt + 1}: {e}")
             if attempt < max_retries - 1:
@@ -479,12 +391,10 @@ def get_page_text_fallback(url: str) -> Optional[str]:
             if attempt < max_retries - 1:
                 time.sleep(2 ** attempt)
             continue
-
     logger.error(f"❌ Не удалось загрузить {url} после {max_retries} попыток")
     return None
 
 def get_youtube_data(video_url: str) -> Dict:
-    """Получить данные YouTube видео с обработкой ошибок"""
     try:
         import yt_dlp
         ydl_opts = {
@@ -507,20 +417,16 @@ def get_youtube_data(video_url: str) -> Dict:
         return {'description': '', 'title': 'Unknown', 'error': error_msg}
 
 def get_page_text(url: str) -> Optional[str]:
-    """Главная функция парсинга (использует только fallback, Selenium удален)"""
     try:
         return get_page_text_fallback(url)
     except Exception as e:
         logger.error(f"Ошибка парсинга: {e}")
         return None
 
-# 🔧 Перевод с retry logic и кэшированием
 @lru_cache(maxsize=1000)
 def translate_line(line: str) -> str:
-    """Перевести одну строку с кэшированием"""
     if not line or not re.search(r'[a-zA-Z]', line):
         return line
-
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -536,11 +442,9 @@ def translate_line(line: str) -> str:
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
             res = requests.get(url, params=params, headers=headers, timeout=5)
-
             if res.status_code == 429:
                 time.sleep(2 ** attempt)
                 continue
-
             if res.status_code == 200:
                 return "".join([part[0] for part in res.json()[0] if part[0]]).strip()
             else:
@@ -551,60 +455,48 @@ def translate_line(line: str) -> str:
         except Exception as e:
             logger.warning(f"Ошибка перевода: {e}")
             return line
-
     return line
 
 def translate_text(text: str) -> str:
-    """Перевести текст по строкам"""
     if not text or not re.search(r'[a-zA-Z]', text):
         return text
-
     lines = text.split('\n')
     translated = [translate_line(line) for line in lines]
     return "\n".join(translated)
 
-# 🔧 Парсинг ингредиентов с поддержкой скобок
 def find_ingredients(text: str) -> List[Dict]:
-    """Найти ингредиенты в тексте"""
     if not text:
         return []
     text_clean = re.sub(r'\(.*?\)', ' ', text)
     units_map = {
-        # Стандартные метрические
         'мл': 'мл', 'ml': 'мл', 'миллилитр': 'мл', 'миллилитров': 'мл',
         'г': 'г', 'g': 'г', 'грамм': 'г', 'граммов': 'г', 'грамма': 'г',
         'кг': 'кг', 'kg': 'кг', 'килограмм': 'кг',
         'л': 'л', 'l': 'л', 'литр': 'л', 'литров': 'л',
-        # Штуки и количество
         'шт': 'шт', 'pcs': 'шт', 'штук': 'шт', 'штука': 'шт', 'штуки': 'шт',
         'зубчик': 'шт', 'зубчика': 'шт', 'зубчиков': 'шт', 'зуб.': 'шт',
         'ломтик': 'шт', 'ломтика': 'шт', 'ломтиков': 'шт', 'ломтей': 'шт',
-        'долька': 'шт', 'дольки': 'шт', 'дольки': 'шт',
+        'долька': 'шт', 'дольки': 'шт',
         'кусок': 'шт', 'куска': 'шт', 'кусков': 'шт',
         'веточка': 'шт', 'веточки': 'шт', 'веточек': 'шт',
         'листок': 'шт', 'листков': 'шт', 'лист': 'шт', 'листья': 'шт', 'листов': 'шт',
         'пучок': 'шт', 'пучка': 'шт', 'пучков': 'шт',
         'горсть': 'шт', 'горсти': 'шт', 'горстей': 'шт',
-        'помидор': 'шт', 'помидора': 'шт', 'помидоров': 'шт',
-        'помидоры': 'шт', 'помидор': 'шт',
+        'помидор': 'шт', 'помидора': 'шт', 'помидоров': 'шт', 'помидоры': 'шт',
         'яйцо': 'шт', 'яйца': 'шт', 'яиц': 'шт',
         'яблоко': 'шт', 'яблока': 'шт', 'яблок': 'шт',
         'банан': 'шт', 'банана': 'шт', 'бананов': 'шт',
-        # Ложки
         'ст.л': 'ст.л', 'ст л': 'ст.л', 'tbsp': 'ст.л', 'столовая': 'ст.л',
         'ложка': 'ст.л', 'ложки': 'ст.л', 'ст. л.': 'ст.л',
         'ч.л': 'ч.л', 'ч л': 'ч.л', 'tsp': 'ч.л', 'чайная': 'ч.л',
-        # Чашки, стаканы
         'стакан': 'шт', 'стакана': 'шт', 'стаканов': 'шт',
         'чашка': 'шт', 'чашки': 'шт', 'чашек': 'шт',
         'чаша': 'шт', 'чаши': 'шт'
     }
     all_units = "|".join(sorted(units_map.keys(), key=len, reverse=True))
-
     pattern = rf'(?:^|[\s,;(])(\d+(?:[.,]\d+)?)\s*({all_units})(?:[\s,;)\.]|$)'
     text_clean = re.sub(r'(\d+)\s*[-—–]\s*(\d+)', r'\2', text_clean)
     matches = list(re.finditer(pattern, text_clean, re.IGNORECASE))
-
     ingredients = []
     seen = set()
     exclude_words = {'минут', 'минуты', 'минута', 'второ', 'часо', 'час', 'градусо', 'градусов',
@@ -618,20 +510,16 @@ def find_ingredients(text: str) -> List[Dict]:
             left_chunk = text_clean[prev_end:start_idx]
             if '=' in left_chunk:
                 continue
-
             end_idx = match.end()
             next_start = matches[i+1].start() if i < len(matches) - 1 else len(text_clean)
             right_chunk = text_clean[end_idx:next_start]
-
             left_name = re.sub(r'[\n,;.!?—–-•:*=…\s]+$', '', left_chunk).strip()
             left_lines = re.split(r'[\n,;=•]', left_name)
             left_name = left_lines[-1].strip()
-
             right_lines = re.split(r'[\n,;=•]', right_chunk)
             right_name = right_lines[0].strip()
             right_name = re.sub(r'^[-—–_:\s]+', '', right_name).strip()
             right_name = " ".join(right_name.split()[:4])
-
             name = ""
             if left_name and any(c.isalpha() for c in left_name) and len(left_name) >= 2:
                 name = left_name
@@ -639,14 +527,12 @@ def find_ingredients(text: str) -> List[Dict]:
                 name = right_name
             if not name:
                 continue
-
             name = re.sub(r'^(хороший пучок|пучок|долька|дольки|зубчик|зубчика|можно)\s+', '', name, flags=re.IGNORECASE)
             name = name.strip().lower()
             if any(ex in name for ex in exclude_words):
                 continue
             if len(name) < 2 or len(name) > 60:
                 continue
-
             key = f"{name}_{unit}"
             if key not in seen and 0 < qty < 10000:
                 ingredients.append({'name': name, 'quantity': qty, 'unit': unit})
@@ -654,14 +540,12 @@ def find_ingredients(text: str) -> List[Dict]:
         except Exception as e:
             logger.debug(f"Ошибка парсинга ингредиента: {e}")
             continue
-
     if len(ingredients) < 3:
         pattern_simple = r'^(.+?)\s*[-–—:]\s*(.+?)$'
         for line in text.split('\n'):
             if match := re.search(pattern_simple, line):
                 ing_part = match.group(1).strip()
                 qty_part = match.group(2).strip()
-
                 qty_match = re.search(r'(\d+(?:[.,]\d+)?)\s*(\S+)', qty_part)
                 if qty_match and len(ing_part) > 2 and ing_part.lower() not in [i['name'] for i in ingredients]:
                     try:
@@ -672,10 +556,8 @@ def find_ingredients(text: str) -> List[Dict]:
                         })
                     except Exception as e:
                         logger.debug(f"Ошибка fallback парсинга: {e}")
-
     return ingredients
 
-# 🔧 Веса для конвертации шт→кг
 INGREDIENT_WEIGHTS = {
     'помидоры': 0.15,
     'помидор': 0.15,
@@ -694,7 +576,6 @@ INGREDIENT_WEIGHTS = {
 }
 
 def calculate_ingredient_cost(name: str, qty: float, unit: str, prices: dict) -> tuple:
-    """Рассчитать стоимость ингредиента"""
     name_clean = name.lower().strip()
     SYNONYMS = {
         'кабачки': 'цуккини', 'кабачок': 'цуккини', 'яйца': 'куриное яйцо', 'яйцо': 'куриное яйцо', 'желток': 'куриное яйцо',
@@ -703,14 +584,11 @@ def calculate_ingredient_cost(name: str, qty: float, unit: str, prices: dict) ->
         'лимонный сок': 'лимон желтый', 'капуста': 'белокочанная капуста', 'картошка': 'картофель',
         'картофельный': 'картофель', 'лук': 'лук репчатый', 'репчатый': 'лук репчатый', 'дрожжи': 'дрожжи сухие'
     }
-
     for syn_k, syn_v in SYNONYMS.items():
         if syn_k in name_clean:
             name_clean = syn_v
             break
-
     p_data = prices.get(name_clean)
-
     if not p_data:
         name_words = set(re.findall(r'[а-яa-z0-9]+', name_clean))
         for k, v in prices.items():
@@ -719,7 +597,6 @@ def calculate_ingredient_cost(name: str, qty: float, unit: str, prices: dict) ->
                 p_data = v
                 name_clean = k
                 break
-
     if not p_data:
         name_words = set(re.findall(r'[а-яa-z0-9]+', name_clean))
         stop_words = {'сухие', 'свежие', 'куриное', 'желток', 'отвар', 'белый', 'красный', 'желтый', 'пшеничная'}
@@ -730,21 +607,16 @@ def calculate_ingredient_cost(name: str, qty: float, unit: str, prices: dict) ->
                 p_data = v
                 name_clean = k
                 break
-
     if not p_data:
         if 'вода' in name_clean or 'отвар' in name_clean:
             return 0.0, " (бесплатный компонент)"
         return 0.0, "Нет цены в базе"
-
     p_price, p_unit = p_data['price'], p_data['unit'].lower().strip()
     u_rec = unit.lower().strip()
-
     if p_price <= 0:
         return 0.0, "Некорректная цена"
-
     if u_rec == p_unit:
         return qty * p_price, ""
-
     if u_rec == 'шт' and p_unit in ['кг', 'kg']:
         w = INGREDIENT_WEIGHTS.get(name_clean, 0.10)
         return qty * w * p_price, f" (из шт в кг: ~{w*1000:.0f}г/шт)"
@@ -770,7 +642,6 @@ with tab1:
         if st.button("🔄 Загрузить", type="primary", use_container_width=True):
             if video_url.strip():
                 YOUTUBE_REGEX = r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(com|be)/'
-
                 if not re.search(YOUTUBE_REGEX, video_url):
                     st.error("❌ Это не похоже на YouTube ссылку. Проверь URL")
                 else:
@@ -838,23 +709,14 @@ with tab2:
             with st.expander(f"📄 {recipe['name']} ({recipe['category']})"):
                 if recipe['video_url']:
                     st.link_button("🔗 Открыть источник", recipe['video_url'])
-
                 edit_mode = st.checkbox("✏️ Режим редактирования рецепта", key=f"edit_mode_{recipe['id']}")
-
                 if edit_mode:
                     st.write("<div style='padding-top:10px;'></div>", unsafe_allow_html=True)
                     edit_name = st.text_input("Изменить название блюда:", value=recipe['name'], key=f"edit_name_{recipe['id']}")
-
                     current_ings_text = "\n".join([f"{ing['name']} {ing['quantity']} {ing['unit']}" for ing in recipe['ingredients']])
-                    edit_ings_text = st.text_area(
-                        "Редактировать список ингредиентов (каждый продукт на новой строке, например: мука 450 г):",
-                        value=current_ings_text,
-                        height=200,
-                        key=f"edit_ing_{recipe['id']}"
-                    )
-
+                    edit_ings_text = st.text_area("Редактировать список ингредиентов (каждый продукт на новой строке, например: мука 450 г):",
+                                                   value=current_ings_text, height=200, key=f"edit_ing_{recipe['id']}")
                     edit_desc = st.text_area("Изменить текст процесса приготовления:", value=recipe['description'], height=250, key=f"edit_desc_{recipe['id']}")
-
                     if st.button("💾 Сохранить изменения рецепта", key=f"save_all_{recipe['id']}", type="primary", use_container_width=True):
                         new_ings = find_ingredients(edit_ings_text)
                         if update_recipe_full(recipe['id'], edit_name.strip(), new_ings, edit_desc):
@@ -883,7 +745,6 @@ with tab2:
                     with v2:
                         st.markdown("**Процесс приготовления:**")
                         st.write(recipe['description'] if recipe['description'] else "Описание отсутствует.")
-
                 st.divider()
                 if st.button("🗑️ Удалить рецепт", key=f"del_{recipe['id']}", use_container_width=True):
                     delete_recipe(recipe['id'])
@@ -917,4 +778,26 @@ with tab3:
                     st.dataframe(pd.DataFrame([{'Ингредиент': k, 'Цена': v['price'], 'Единица': v['unit']} for k, v in prices.items()]), use_container_width=True)
             except Exception as e:
                 st.error(f"❌ Ошибка: {e}")
-                logger.error(f"Ошибка з
+                logger.error(f"Ошибка загрузки файла: {e}")
+    st.divider()
+    st.write("**Текущие цены:**")
+    current_prices = get_prices()
+    if current_prices:
+        st.dataframe(pd.DataFrame([{'Ингредиент': k, 'Цена': v['price'], 'Единица': v['unit']} for k, v in current_prices.items()]), use_container_width=True)
+        st.write("**Добавить цену вручную:**")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            man_name = st.text_input("Ингредиент:", placeholder="Например: мука пшеничная")
+        with c2:
+            man_price = st.number_input("Цена ($):", min_value=0.0, step=0.1)
+        with c3:
+            man_unit = st.selectbox("Единица:", ["кг", "г", "л", "мл", "шт"])
+        if st.button("➕ Добавить позицию", use_container_width=True):
+            if man_name.strip():
+                save_prices({man_name: {'price': man_price, 'unit': man_unit}})
+                st.rerun()
+            else:
+                st.error("❌ Введи название ингредиента")
+    else:
+        st.info("📌 База цен пуста.")
+
