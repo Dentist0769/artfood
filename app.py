@@ -45,6 +45,13 @@ def save_recipe(name: str, category: str, ingredients: List[Dict], description: 
     conn.commit()
     conn.close()
 
+def update_recipe_name(recipe_id: int, new_name: str):
+    conn = sqlite3.connect('recipes.db')
+    c = conn.cursor()
+    c.execute('UPDATE recipes SET name = ? WHERE id = ?', (new_name, recipe_id))
+    conn.commit()
+    conn.close()
+
 def get_recipes(category: Optional[str] = None) -> List[Dict]:
     conn = sqlite3.connect('recipes.db')
     c = conn.cursor()
@@ -97,7 +104,6 @@ def get_prices() -> Dict[str, Dict]:
     return prices
 
 def clean_description(text: str) -> str:
-    """Глубокая очистка текста от внешних ссылок, банковских карт и рекламы"""
     if not text:
         return ""
     text = re.sub(r'https?://[^\s]+', '', text)
@@ -119,7 +125,6 @@ def clean_description(text: str) -> str:
         'helps and motivates', 'give a like', 'leave a comment', 'any questions', 'share the video',
         'for your warmth', 'channel come alive', 'attention!'
     ]
-    
     for line in lines:
         line_strip = line.strip()
         if not line_strip:
@@ -148,7 +153,6 @@ def get_youtube_data(video_url: str) -> Dict:
         return {'description': '', 'title': 'Unknown', 'error': str(e)}
 
 def get_page_text(url: str) -> Optional[str]:
-    """Парсинг кулинарных страниц с умным извлечением разметки Schema.org"""
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         response = requests.get(url, headers=headers, timeout=10)
@@ -174,7 +178,6 @@ def get_page_text(url: str) -> Optional[str]:
                         for item in obj:
                             search_recipe(item)
                 search_recipe(data)
-                
                 if recipes:
                     recipe = recipes[0]
                     clean_lines = []
@@ -210,7 +213,8 @@ def get_page_text(url: str) -> Optional[str]:
         for selector in ['.header', '.footer', '.menu', '.sidebar', '.nav', '.breadcrumbs', '.comments', '.banner', '.sharing']:
             for element in soup.select(selector):
                 element.decompose()
-        return clean_description(soup.get_text('\n'))
+        lines = [line.strip() for line in soup.get_text('\n').splitlines() if line.strip()]
+        return clean_description('\n'.join(lines))
     except:
         return None
 
@@ -237,12 +241,9 @@ def translate_text(text: str) -> str:
     return "\n".join(translated)
 
 def find_ingredients(text: str) -> List[Dict]:
-    """Глобальный триггерный поиск ингредиентов по парам Число+Мера во всем тексте"""
     if not text:
         return []
-        
     text_clean = re.sub(r'\(.*?\)', ' ', text)
-    
     units_map = {
         'мл': 'мл', 'ml': 'мл', 'миллилитр': 'мл', 'миллилитров': 'мл',
         'г': 'г', 'g': 'г', 'грамм': 'г', 'граммов': 'г', 'грамма': 'г',
@@ -253,11 +254,8 @@ def find_ingredients(text: str) -> List[Dict]:
         'ч.л': 'ч.л', 'ч л': 'ч.л', 'tsp': 'ч.л', 'чайная': 'ч.л',
         'зубчик': 'шт', 'зубчика': 'шт', 'зубчиков': 'шт', 'зуб.': 'шт'
     }
-
     all_units = "|".join(sorted(units_map.keys(), key=len, reverse=True))
     pattern = rf'\b(\d+(?:[.,]\d+)?)\s*({all_units})\b'
-    
-    # Схлопываем дефисные диапазоны авторов (например, "2-3 ст л" перейдет в "3 ст л")
     text_clean = re.sub(r'(\d+)\s*[-—–]\s*(\d+)', r'\2', text_clean)
     matches = list(re.finditer(pattern, text_clean, re.IGNORECASE))
     
@@ -270,17 +268,12 @@ def find_ingredients(text: str) -> List[Dict]:
         try:
             qty = float(match.group(1).replace(',', '.'))
             unit = units_map[match.group(2).lower()]
-            
             start_idx = match.start()
-            end_idx = match.end()
-            
             prev_end = matches[i-1].end() if i > 0 else 0
             left_chunk = text_clean[prev_end:start_idx]
-            
-            # Если это знак равенства дубликата веса (например, 260 мл = 260 г), пропускаем шаг
-            if '=' in left_chunk:
-                continue
+            if '=' in left_chunk: continue
                 
+            end_idx = match.end()
             next_start = matches[i+1].start() if i < len(matches) - 1 else len(text_clean)
             right_chunk = text_clean[end_idx:next_start]
             
@@ -298,13 +291,10 @@ def find_ingredients(text: str) -> List[Dict]:
                 name = left_name
             elif right_name and any(c.isalpha() for c in right_name) and len(right_name) >= 2:
                 name = right_name
-                
-            if not name:
-                continue
+            if not name: continue
                 
             name = re.sub(r'^(хороший пучок|пучок|долька|дольки|зубчик|зубчика|можно)\s+', '', name, flags=re.IGNORECASE)
             name = name.strip().lower()
-            
             if any(ex in name for ex in exclude_words): continue
             if len(name) < 2 or len(name) > 60: continue
             
@@ -312,28 +302,51 @@ def find_ingredients(text: str) -> List[Dict]:
             if key not in seen and 0 < qty < 10000:
                 ingredients.append({'name': name, 'quantity': qty, 'unit': unit})
                 seen.add(key)
-        except:
-            continue
-            
+        except: continue
     return ingredients
 
 def calculate_ingredient_cost(name: str, qty: float, unit: str, prices: dict) -> tuple[float, str]:
     name_clean = name.lower().strip()
     SYNONYMS = {
-        'кабачки': 'цуккини', 'кабачок': 'цуккини', 'яйца': 'куриное яйцо', 'яйцо': 'куриное яйцо',
+        'кабачки': 'цуккини', 'кабачок': 'цуккини', 'яйца': 'куриное яйцо', 'яйцо': 'куриное яйцо', 'желток': 'куриное яйцо',
         'оливковое масло': 'масло растительное', 'растительное масло': 'масло растительное',
         'подсолнечное масло': 'масло растительное', 'соевый соус': 'соус соевый',
-        'лимонный сок': 'лимон желтый', 'капуста': 'белокочанная капуста', 'картошка': 'картофель'
+        'лимонный сок': 'лимон желтый', 'капуста': 'белокочанная капуста', 'картошка': 'картофель',
+        'картофельный': 'картофель', 'лук': 'лук репчатый', 'репчатый': 'лук репчатый', 'дрожжи': 'дрожжи сухие'
     }
-    if name_clean in SYNONYMS:
-        name_clean = SYNONYMS[name_clean]
+    for syn_k, syn_v in SYNONYMS.items():
+        if syn_k in name_clean:
+            name_clean = syn_v
+            break
+            
     p_data = prices.get(name_clean)
+    
+    # Умный точечный поиск по совпадению слов (если порядок перевернут)
     if not p_data:
+        name_words = set(re.findall(r'[а-яa-z0-9]+', name_clean))
         for k, v in prices.items():
-            if k in name_clean or name_clean in k:
+            k_words = set(re.findall(r'[а-яa-z0-9]+', k))
+            if k_words and (k_words.issubset(name_words) or name_words.issubset(k_words)):
                 p_data = v
+                name_clean = k
                 break
-    if not p_data: return 0.0, "Нет цены в базе"
+                
+    # Фаллбэк-поиск по ключевому корню слова (пропускаем стоп-слова описания)
+    if not p_data:
+        name_words = set(re.findall(r'[а-яa-z0-9]+', name_clean))
+        stop_words = {'сухие', 'свежие', 'куриное', 'желток', 'отвар', 'белый', 'красный', 'желтый', 'пшеничная'}
+        meaningful_words = name_words - stop_words
+        for k, v in prices.items():
+            k_words = set(re.findall(r'[а-яa-z0-9]+', k))
+            if k_words.intersection(meaningful_words):
+                p_data = v
+                name_clean = k
+                break
+                
+    if not p_data: 
+        if 'вода' in name_clean or 'отвар' in name_clean:
+            return 0.0, " (бесплатный компонент)"
+        return 0.0, "Нет цены в базе"
     
     p_price, p_unit = p_data['price'], p_data['unit'].lower().strip()
     u_rec = unit.lower().strip()
@@ -421,6 +434,20 @@ with tab2:
     if recipes:
         for recipe in recipes:
             with st.expander(f"📄 {recipe['name']} ({recipe['category']})"):
+                
+                # Функция динамического изменения имени рецепта
+                c_name1, c_name2 = st.columns([3, 1])
+                with c_name1:
+                    new_name = st.text_input("Редактировать название рецепта:", value=recipe['name'], key=f"ren_in_{recipe['id']}")
+                with c_name2:
+                    st.write("<div style='padding-top:28px;'></div>", unsafe_allow_html=True)
+                    if st.button("✏️ Сохранить имя", key=f"ren_btn_{recipe['id']}", use_container_width=True):
+                        if new_name.strip() and new_name.strip() != recipe['name']:
+                            update_recipe_name(recipe['id'], new_name.strip())
+                            st.success("Название обновлено!")
+                            st.rerun()
+
+                st.divider()
                 if recipe['video_url']: st.write(r"**Источник:** [Открыть ссылку](%s)" % recipe['video_url'])
                 portions = st.number_input("Количество порций:", min_value=1, value=1, key=f"p_{recipe['id']}")
                 st.divider()
