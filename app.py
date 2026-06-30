@@ -156,9 +156,15 @@ def get_prices() -> Dict[str, Dict]:
     return prices
 
 def clean_description(text: str) -> str:
-    """Очистить описание от ссылок и спама"""
+    """Очистить описание от ссылок, спама и HTML тегов"""
     if not text:
         return ""
+
+    # 🔧 ИСПРАВЛЕНО: Удаляем HTML теги ВСЕ сразу
+    text = re.sub(r'<[^>]+>', '', text)
+    # Удаляем HTML entities
+    text = re.sub(r'&[a-z]+;', '', text)
+
     text = re.sub(r'https?://[^\s]+', '', text)
     text = re.sub(r'www\.[^\s]+', '', text)
     text = re.sub(r'\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b', '', text)
@@ -296,7 +302,7 @@ def get_page_text(url: str) -> Optional[str]:
                 logger.error(f"Ошибка парсинга schema.org: {e}")
                 continue
 
-        # Удаление ненужных элементов (оригинальный полный список селекторов)
+        # 🔧 ИСПРАВЛЕНО: Удаляем HTML теги ДО получения текста
         for tag in ['script', 'style', 'nav', 'header', 'footer', 'aside', 'form', 'noscript', 'button', 'svg']:
             for element in soup.find_all(tag):
                 element.decompose()
@@ -306,7 +312,9 @@ def get_page_text(url: str) -> Optional[str]:
             for element in soup.select(selector):
                 element.decompose()
 
-        lines = [line.strip() for line in soup.get_text('\n').splitlines() if line.strip()]
+        # 🔧 ВАЖНО: Используем get_text() который автоматически удаляет теги
+        text = soup.get_text('\n')
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
         return clean_description('\n'.join(lines))
     except Exception as e:
         logger.error(f"Ошибка при парсинге страницы: {e}")
@@ -583,7 +591,6 @@ with tab1:
                     st.session_state.video_title = "Рецепт со страницы"
                     st.success("✅ Страница обработана!")
                 else:
-                    # 🔧 БАГ #1: Исправлена иероглифная опечатка
                     st.error("❌ Не удалось загрузить страницу")
     if 'recipe_description' in st.session_state:
         st.divider()
@@ -728,3 +735,4 @@ with tab3:
                 st.error("❌ Введи название ингредиента")
     else:
         st.info("📌 База цен пуста.")
+
