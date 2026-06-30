@@ -21,6 +21,31 @@ st.markdown("Управление рецептами, ингредиентами
 # 🔧 БАГ #8: Ограничение размера файла
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 
+# 🔧 SELENIUM: Инициализация драйвера один раз
+@st.cache_resource
+def get_selenium_driver():
+    """Получить Selenium WebDriver (кэшируется для производительности)"""
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from webdriver_manager.chrome import ChromeDriverManager
+        from selenium.webdriver.chrome.service import Service
+
+        chrome_options = Options()
+        chrome_options.add_argument("--headless")  # Без окна браузера
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+        chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        driver.set_page_load_timeout(20)
+        return driver
+    except Exception as e:
+        logger.error(f"Ошибка инициализации Selenium: {e}")
+        return None
+
 def init_db():
     conn = sqlite3.connect('recipes.db')
     c = conn.cursor()
@@ -51,7 +76,6 @@ def is_safe_string(text: str, max_len: int = 500) -> bool:
     """Проверить строку на опасный контент"""
     if not text or len(text) > max_len:
         return False
-    # Проверить на SQL-like синтаксис (дополнительная защита)
     if re.search(r"(?i)(DROP|DELETE|INSERT|UPDATE|SELECT)\s", text):
         return False
     return True
@@ -160,9 +184,7 @@ def clean_description(text: str) -> str:
     if not text:
         return ""
 
-    # 🔧 ИСПРАВЛЕНО: Удаляем HTML теги ВСЕ сразу
     text = re.sub(r'<[^>]+>', '', text)
-    # Удаляем HTML entities
     text = re.sub(r'&[a-z]+;', '', text)
 
     text = re.sub(r'https?://[^\s]+', '', text)
@@ -193,8 +215,6 @@ def clean_description(text: str) -> str:
         filtered_lines.append(line_strip)
 
     text = '\n'.join(filtered_lines)
-
-    # 🔧 БАГ #10: Unicode regex для хештегов
     text = re.sub(r'#[\w]+', '', text, flags=re.UNICODE | re.IGNORECASE)
     text = re.sub(r'\n{2,}', '\n', text)
     return text.strip()
@@ -203,7 +223,6 @@ def get_youtube_data(video_url: str) -> Dict:
     """Получить данные YouTube видео с обработкой ошибок"""
     try:
         import yt_dlp
-        # 🔧 БАГ #14: Добавлены timeout и другие опции
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
@@ -224,35 +243,20 @@ def get_youtube_data(video_url: str) -> Dict:
         return {'description': '', 'title': 'Unknown', 'error': error_msg}
 
 def get_page_text(url: str) -> Optional[str]:
-    """Получить текст со страницы с парсингом Schema.org"""
+    """Получить текст со страницы используя Selenium (работает с JS-сайтами)"""
+    driver = None
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'ru-RU,ru;q=0.9',
-            'Referer': 'https://www.google.com/',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1'
-        }
-        response = requests.get(url, headers=headers, timeout=10)
-
-        # 🔧 ИСПРАВЛЕНО: Лучшая обработка кодировки
-        if response.encoding is None or response.encoding.lower() == 'none':
-            response.encoding = 'utf-8'
-        else:
-            # Пытаемся часто встречаемые кодировки
-            for enc in ['utf-8', 'windows-1251', 'iso-8859-5', 'cp1251']:
-                try:
-                    response.content.decode(enc)
-                    response.encoding = enc
-                    break
-                except:
-                    continue
-
-        if response.status_code != 200:
+        driver = get_selenium_driver()
+        if not driver:
+            logger.error("Selenium не инициализирован")
             return None
-        soup = BeautifulSoup(response.text, 'html.parser')
+
+        # Загружаем страницу с Selenium
+        driver.get(url)
+        time.sleep(3)  # Даем странице загрузиться и выполнить JS
+
+        # Парсим HTML с BeautifulSoup
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
 
         # Попытка получить schema.org Recipe
         scripts = soup.find_all('script', type='application/ld+json')
@@ -302,23 +306,34 @@ def get_page_text(url: str) -> Optional[str]:
                 logger.error(f"Ошибка парсинга schema.org: {e}")
                 continue
 
-        # 🔧 ИСПРАВЛЕНО: Удаляем HTML теги ДО получения текста
+        # Удаление ненужных элементов
         for tag in ['script', 'style', 'nav', 'header', 'footer', 'aside', 'form', 'noscript', 'button', 'svg']:
             for element in soup.find_all(tag):
                 element.decompose()
 
-        # 🔧 Вернул оригинальные селекторы CSS для правильного парсинга
-        for selector in ['.header', '.footer', '.menu', '.sidebar', '.nav', '.breadcrumbs', '.comments', '.banner', '.sharing']:
+        for selector in ['.header', '.footer', '.menu', '.sidebar', '.nav', '.breadcrumbs', '.comments', '.banner', '.sharing', '.ads', '.advertisement', '.related', '.recommend']:
             for element in soup.select(selector):
                 element.decompose()
 
-        # 🔧 ВАЖНО: Используем get_text() который автоматически удаляет теги
         text = soup.get_text('\n')
         lines = [line.strip() for line in text.splitlines() if line.strip()]
-        return clean_description('\n'.join(lines))
+        result = clean_description('\n'.join(lines))
+
+        # Ограничиваем размер результата (максимум 5000 символов)
+        if len(result) > 5000:
+            result = result[:5000]
+
+        return result if result else None
+
     except Exception as e:
-        logger.error(f"Ошибка при парсинге страницы: {e}")
+        logger.error(f"Ошибка при парсинге страницы (Selenium): {e}")
         return None
+    finally:
+        if driver:
+            try:
+                driver.quit()
+            except:
+                pass
 
 # 🔧 БАГ #2: Улучшенный перевод с retry logic и кэшированием
 @lru_cache(maxsize=1000)
@@ -343,8 +358,8 @@ def translate_line(line: str) -> str:
             }
             res = requests.get(url, params=params, headers=headers, timeout=5)
 
-            if res.status_code == 429:  # Rate limited
-                time.sleep(2 ** attempt)  # Exponential backoff
+            if res.status_code == 429:
+                time.sleep(2 ** attempt)
                 continue
 
             if res.status_code == 200:
@@ -387,7 +402,6 @@ def find_ingredients(text: str) -> List[Dict]:
     }
     all_units = "|".join(sorted(units_map.keys(), key=len, reverse=True))
 
-    # 🔧 БАГ #11: Улучшенный regex с поддержкой скобок
     pattern = rf'(?:^|[\s,;(])(\d+(?:[.,]\d+)?)\s*({all_units})(?:[\s,;)\.]|$)'
     text_clean = re.sub(r'(\d+)\s*[-—–]\s*(\d+)', r'\2', text_clean)
     matches = list(re.finditer(pattern, text_clean, re.IGNORECASE))
@@ -442,7 +456,6 @@ def find_ingredients(text: str) -> List[Dict]:
             logger.debug(f"Ошибка парсинга ингредиента: {e}")
             continue
 
-    # 🔧 БАГ #5: Fallback парсинг для ингредиентов без количеств
     if len(ingredients) < 3:
         pattern_simple = r'^(.+?)\s*[-–—:]\s*(.+?)$'
         for line in text.split('\n'):
@@ -471,8 +484,8 @@ INGREDIENT_WEIGHTS = {
     'кабачок': 0.25,
     'лук репчатый': 0.08,
     'лук': 0.08,
-    'чеснок': 0.005,  # зубчик чеснока
-    'куриное яйцо': 0.050,  # одно яйцо ~50г
+    'чеснок': 0.005,
+    'куриное яйцо': 0.050,
     'яйцо': 0.050,
     'яблоко': 0.180,
     'банан': 0.120,
@@ -492,7 +505,6 @@ def calculate_ingredient_cost(name: str, qty: float, unit: str, prices: dict) ->
         'картофельный': 'картофель', 'лук': 'лук репчатый', 'репчатый': 'лук репчатый', 'дрожжи': 'дрожжи сухие'
     }
 
-    # 🔧 БАГ #13: Оптимизированный поиск синонимов
     for syn_k, syn_v in SYNONYMS.items():
         if syn_k in name_clean:
             name_clean = syn_v
@@ -528,7 +540,6 @@ def calculate_ingredient_cost(name: str, qty: float, unit: str, prices: dict) ->
     p_price, p_unit = p_data['price'], p_data['unit'].lower().strip()
     u_rec = unit.lower().strip()
 
-    # 🔧 БАГ #12: Защита от деления на ноль
     if p_price <= 0:
         return 0.0, "Некорректная цена"
 
@@ -536,7 +547,6 @@ def calculate_ingredient_cost(name: str, qty: float, unit: str, prices: dict) ->
         return qty * p_price, ""
 
     if u_rec == 'шт' and p_unit in ['кг', 'kg']:
-        # 🔧 БАГ #6: Улучшенные веса
         w = INGREDIENT_WEIGHTS.get(name_clean, 0.10)
         return qty * w * p_price, f" (из шт в кг: ~{w*1000:.0f}г/шт)"
     if p_unit in ['кг', 'kg'] and u_rec in ['г', 'g', 'грамм', 'граммов']:
@@ -560,7 +570,6 @@ with tab1:
         video_url = st.text_input("YouTube ссылка:", placeholder="https://youtube.com/watch?v=...")
         if st.button("🔄 Загрузить", type="primary", use_container_width=True):
             if video_url.strip():
-                # 🔧 БАГ #4: Валидация YouTube URL
                 YOUTUBE_REGEX = r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(com|be)/'
 
                 if not re.search(YOUTUBE_REGEX, video_url):
@@ -581,7 +590,7 @@ with tab1:
         page_url = st.text_input("Ссылка на страницу:", placeholder="https://food.ru/recipes/...")
         if st.button("🔄 Загрузить", type="primary", use_container_width=True):
             if page_url.strip():
-                with st.spinner("⏳ Анализ страницы..."):
+                with st.spinner("⏳ Анализ страницы (может занять 3-5 секунд)..."):
                     page_text = get_page_text(page_url)
                 if page_text:
                     trans_page = translate_text(page_text)
@@ -610,7 +619,6 @@ with tab1:
         category = st.selectbox("Категория:", CATEGORIES)
         if st.button("💾 Подтвердить и сохранить рецепт", type="primary", use_container_width=True):
             if recipe_name.strip():
-                # 🔧 БАГ #7: Безопасное удаление session state
                 if save_recipe(recipe_name, category, st.session_state.ingredients, edited_description, st.session_state.get('video_url')):
                     st.success("✅ Рецепт успешно сохранен!")
                     if 'ingredients' in st.session_state:
@@ -629,7 +637,6 @@ with tab2:
     if recipes:
         for recipe in recipes:
             with st.expander(f"📄 {recipe['name']} ({recipe['category']})"):
-                # 🔧 БАГ #3: Безопасный вывод ссылки
                 if recipe['video_url']:
                     st.link_button("🔗 Открыть источник", recipe['video_url'])
 
@@ -672,7 +679,6 @@ with tab2:
                                 st.write(f"• {ing['quantity']} {ing['unit']} {ing['name']} — **${cost:.2f}** <span style='color:green; font-size:11px;'>{warn}</span>", unsafe_allow_html=True)
                         st.divider()
                         st.metric("💰 Стоимость замеса:", f"${total_cost:.2f}")
-                        # 🔧 БАГ #12: Защита от деления на ноль
                         if portions > 1 and portions != 0:
                             st.metric("🍽️ Себестоимость 1 порции:", f"${(total_cost / portions):.2f}")
                     with v2:
@@ -690,7 +696,6 @@ with tab3:
     st.subheader("💰 Управление ценами")
     uploaded_file = st.file_uploader("Загрузить прайс-лист (.txt, .csv):", type=["txt", "csv"])
     if uploaded_file:
-        # 🔧 БАГ #8: Проверка размера файла
         if uploaded_file.size > MAX_FILE_SIZE:
             st.error(f"❌ Файл слишком большой ({uploaded_file.size/1024/1024:.1f}MB > 5MB)")
         else:
@@ -736,3 +741,4 @@ with tab3:
     else:
         st.info("📌 База цен пуста.")
 
+              
